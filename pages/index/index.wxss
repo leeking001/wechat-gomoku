@@ -1,5 +1,0 @@
-.container{padding:10px}
-.status{display:flex;align-items:center;gap:10px;justify-content:space-between;margin-bottom:10px}
-.board{border:1px solid #999;background:#f5f5f5}
-.picker{padding:4px 8px;border:1px solid #ddd;border-radius:4px}
-.tips{margin-top:10px;color:#888;font-size:12px}

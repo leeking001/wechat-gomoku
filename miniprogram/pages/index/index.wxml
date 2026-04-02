@@ -1,0 +1,100 @@
+<!--miniprogram/pages/index/index.wxml-->
+<view class="container">
+  <!-- 标题 -->
+  <view class="header">
+    <text class="title">五子棋</text>
+    <text class="subtitle">与 AI 对战</text>
+  </view>
+
+  <!-- 游戏统计 -->
+  <view class="stats">
+    <view class="stat-item">
+      <text class="stat-label">胜</text>
+      <text class="stat-value">{{stats.wins}}</text>
+    </view>
+    <view class="stat-item">
+      <text class="stat-label">负</text>
+      <text class="stat-value">{{stats.losses}}</text>
+    </view>
+    <view class="stat-item">
+      <text class="stat-label">平</text>
+      <text class="stat-value">{{stats.draws}}</text>
+    </view>
+  </view>
+
+  <!-- 游戏状态提示 -->
+  <view class="game-status" wx:if="{{gameOver}}">
+    <text class="status-text" wx:if="{{winner === 1}}">🎉 你赢了！</text>
+    <text class="status-text" wx:elif="{{winner === 2}}">😢 AI 赢了</text>
+    <text class="status-text" wx:else>🤝 平局</text>
+  </view>
+
+  <view class="game-status" wx:elif="{{aiThinking}}">
+    <text class="status-text">🤖 AI 思考中...</text>
+  </view>
+
+  <!-- 棋盘 -->
+  <view class="board-container">
+    <canvas
+      id="gomokuBoard"
+      class="gomoku-board"
+      bindtap="onBoardClick"
+      data-cell-size="{{25}}"
+    ></canvas>
+
+    <!-- 棋盘网格 -->
+    <view class="board-grid">
+      <view class="board-row" wx:for="{{boardSize}}" wx:key="*this">
+        <view
+          class="board-cell"
+          wx:for="{{boardSize}}"
+          wx:key="*this"
+          data-row="{{index}}"
+          data-col="{{item}}"
+        >
+          <!-- 黑棋 -->
+          <view
+            class="stone black"
+            wx:if="{{board[index][item] === 1}}"
+          ></view>
+
+          <!-- 白棋 -->
+          <view
+            class="stone white"
+            wx:if="{{board[index][item] === 2}}"
+          ></view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 游戏控制按钮 -->
+  <view class="button-group">
+    <button
+      class="btn btn-primary"
+      bindtap="onRestart"
+      disabled="{{!gameStarted}}"
+    >
+      重新开始
+    </button>
+
+    <button
+      class="btn btn-secondary"
+      bindtap="onShowRules"
+    >
+      游戏规则
+    </button>
+
+    <button
+      class="btn btn-secondary"
+      bindtap="onShare"
+    >
+      分享游戏
+    </button>
+  </view>
+
+  <!-- 游戏提示 -->
+  <view class="tips">
+    <text class="tip-text">💡 提示：黑棋先手，点击棋盘放置棋子</text>
+  </view>
+</view>
