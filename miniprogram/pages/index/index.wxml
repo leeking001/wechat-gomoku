@@ -35,15 +35,8 @@
 
   <!-- 棋盘 -->
   <view class="board-container">
-    <canvas
-      id="gomokuBoard"
-      class="gomoku-board"
-      bindtap="onBoardClick"
-      data-cell-size="{{25}}"
-    ></canvas>
-
     <!-- 棋盘网格 -->
-    <view class="board-grid">
+    <view class="board-grid" bindtap="onBoardClick">
       <view class="board-row" wx:for="{{boardSize}}" wx:key="*this">
         <view
           class="board-cell"

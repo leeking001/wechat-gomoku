@@ -86,22 +86,18 @@
   border: 3px solid #8b4513;
   margin-bottom: 20px;
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-}
-
-.gomoku-board {
-  position: absolute;
-  width: 100%;
-  height: 100%;
+  padding: 0;
 }
 
 /* 棋盘网格 */
 .board-grid {
-  position: absolute;
+  position: relative;
   width: 100%;
   height: 100%;
   display: grid;
   grid-template-columns: repeat(15, 1fr);
   grid-template-rows: repeat(15, 1fr);
+  background: #deb887;
 }
 
 .board-row {

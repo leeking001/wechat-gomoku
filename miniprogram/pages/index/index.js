@@ -44,13 +44,13 @@ Page({
   onBoardClick(e) {
     if (this.data.gameOver || this.data.aiThinking) return;
 
-    const { x, y } = e.detail;
-    const cellSize = e.currentTarget.dataset.cellSize || 25;
+    // 获取点击的棋盘单元格
+    const target = e.target;
+    const row = parseInt(target.dataset.row);
+    const col = parseInt(target.dataset.col);
 
-    const col = Math.round(x / cellSize);
-    const row = Math.round(y / cellSize);
-
-    if (row < 0 || row >= BOARD_SIZE || col < 0 || col >= BOARD_SIZE) {
+    // 验证坐标有效性
+    if (isNaN(row) || isNaN(col) || row < 0 || row >= BOARD_SIZE || col < 0 || col >= BOARD_SIZE) {
       return;
     }
 
