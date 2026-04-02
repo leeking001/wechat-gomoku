@@ -237,5 +237,27 @@ Page({
       withShareTicket: true,
       menus: ['shareAppMessage', 'shareTimeline']
     });
+  },
+
+  /**
+   * 分享给朋友
+   */
+  onShareAppMessage() {
+    return {
+      title: '五子棋 - 与 AI 对战',
+      path: '/pages/index/index',
+      imageUrl: '/images/share-icon.png'
+    };
+  },
+
+  /**
+   * 分享到朋友圈
+   */
+  onShareTimeline() {
+    return {
+      title: '五子棋 - 与 AI 对战',
+      path: '/pages/index/index',
+      imageUrl: '/images/share-icon.png'
+    };
   }
 });
