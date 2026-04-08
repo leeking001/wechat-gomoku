@@ -1,0 +1,25 @@
+# Node.js 脚本
+generate_sounds.js
+generate_sounds_improved.js
+node_modules/
+*.log
+
+# Shell 脚本
+*.sh
+
+# 系统文件
+.DS_Store
+.env
+.env.local
+
+# 文档目录（开发文档，不需要部署）
+docs/
+*.md
+README.md
+
+# IDE
+.vscode/
+.idea/
+
+# 微信开发者工具
+miniprogram_npm/

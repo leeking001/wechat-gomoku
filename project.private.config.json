@@ -1,0 +1,23 @@
+{
+  "libVersion": "3.15.1",
+  "projectname": "%E6%8A%80%E8%83%BD%E4%BA%94%E5%AD%90%E6%A3%8B",
+  "compileType": "game",
+  "condition": {},
+  "setting": {
+    "urlCheck": true,
+    "lazyloadPlaceholderEnable": false,
+    "skylineRenderEnable": false,
+    "preloadBackgroundData": false,
+    "autoAudits": false,
+    "useApiHook": true,
+    "showShadowRootInWxmlPanel": true,
+    "useStaticServer": false,
+    "useLanDebug": false,
+    "showES6CompileOption": false,
+    "compileHotReLoad": true,
+    "checkInvalidKey": true,
+    "ignoreDevUnusedFiles": true,
+    "bigPackageSizeSupport": false,
+    "useIsolateContext": true
+  }
+}
