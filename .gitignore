@@ -15,7 +15,8 @@ node_modules/
 # 文档目录（开发文档，不需要部署）
 docs/
 *.md
-README.md
+# 但保留 README.md 用于 GitHub
+!README.md
 
 # IDE
 .vscode/
