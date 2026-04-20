@@ -2,23 +2,10 @@
   "description": "五子棋·诸神之战 - 微信小游戏版",
   "projectname": "skill-gomoku",
   "appid": "wxf88371090ce002cd",
-  "libVersion": "3.15.1",
+  "libVersion": "2.19.4",
   "compileType": "game",
   "packOptions": {
-    "ignore": [
-      {
-        "type": "folder",
-        "value": ".claude"
-      },
-      {
-        "type": "folder",
-        "value": ".git"
-      },
-      {
-        "type": "file",
-        "value": ".DS_Store"
-      }
-    ],
+    "ignore": [],
     "include": []
   },
   "setting": {
@@ -51,11 +38,7 @@
     "compileWorklet": false,
     "disableUseStrict": false,
     "swc": false,
-    "disableSWC": true,
-    "packNpmManually": false,
-    "packNpmRelationList": [],
-    "localPlugins": false,
-    "useCompilerPlugins": false
+    "disableSWC": true
   },
   "condition": {},
   "editorSetting": {
