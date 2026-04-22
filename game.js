@@ -1432,23 +1432,68 @@ function drawSidePicker() {
   ctx.font = '12px SimHei, Arial';
   ctx.fillText('点击后将自动开局', panelX + panelW / 2, panelY + 58);
 
-  drawRoundedCard(blackX, btnY, btnW, btnH, {
-    radius: 12,
-    fillStyle: 'rgba(94, 123, 145, 0.52)',
-    strokeStyle: 'rgba(214, 230, 247, 0.82)',
-    lineWidth: 1.2
+  drawSideOptionButton(blackX, btnY, btnW, btnH, {
+    side: BLACK,
+    title: '执黑',
+    subtitle: '先手开杀'
   });
-  drawRoundedCard(whiteX, btnY, btnW, btnH, {
-    radius: 12,
-    fillStyle: 'rgba(153, 110, 104, 0.52)',
-    strokeStyle: 'rgba(245, 223, 217, 0.82)',
-    lineWidth: 1.2
+  drawSideOptionButton(whiteX, btnY, btnW, btnH, {
+    side: WHITE,
+    title: '执白',
+    subtitle: '后手反打'
   });
-  ctx.fillStyle = '#f0f6ff';
-  ctx.font = 'bold 16px SimHei, Arial';
-  ctx.fillText('执黑先手', blackX + btnW / 2, btnY + btnH / 2);
-  ctx.fillStyle = '#fff3ef';
-  ctx.fillText('执白后手', whiteX + btnW / 2, btnY + btnH / 2);
+}
+
+function drawSideOptionButton(x, y, w, h, options) {
+  const isBlack = options.side === BLACK;
+  const bg = ctx.createLinearGradient(x, y, x, y + h);
+  if (isBlack) {
+    bg.addColorStop(0, 'rgba(41, 49, 58, 0.96)');
+    bg.addColorStop(1, 'rgba(12, 16, 20, 0.98)');
+  } else {
+    bg.addColorStop(0, 'rgba(249, 244, 230, 0.95)');
+    bg.addColorStop(1, 'rgba(205, 194, 174, 0.92)');
+  }
+
+  drawRoundedCard(x, y, w, h, {
+    radius: 12,
+    fillStyle: bg,
+    strokeStyle: isBlack ? 'rgba(210, 225, 238, 0.78)' : 'rgba(126, 105, 72, 0.82)',
+    lineWidth: 1.3,
+    shadowBlur: 6
+  });
+
+  const stoneX = x + 27;
+  const stoneY = y + h / 2;
+  const stoneR = 13;
+  const stoneGrad = ctx.createRadialGradient(stoneX - 5, stoneY - 6, 2, stoneX, stoneY, stoneR);
+  if (isBlack) {
+    stoneGrad.addColorStop(0, '#6f7881');
+    stoneGrad.addColorStop(0.46, '#252b31');
+    stoneGrad.addColorStop(1, '#050608');
+  } else {
+    stoneGrad.addColorStop(0, '#ffffff');
+    stoneGrad.addColorStop(0.62, '#ece7dc');
+    stoneGrad.addColorStop(1, '#bcb2a0');
+  }
+  ctx.save();
+  ctx.shadowColor = isBlack ? 'rgba(0, 0, 0, 0.55)' : 'rgba(0, 0, 0, 0.26)';
+  ctx.shadowBlur = 5;
+  ctx.shadowOffsetY = 2;
+  ctx.fillStyle = stoneGrad;
+  ctx.beginPath();
+  ctx.arc(stoneX, stoneY, stoneR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = isBlack ? '#f2f7ff' : '#1c252b';
+  ctx.font = 'bold 15px SimHei, Arial';
+  ctx.fillText(options.title, x + 50, y + 20);
+  ctx.fillStyle = isBlack ? 'rgba(220, 230, 240, 0.78)' : 'rgba(71, 58, 39, 0.78)';
+  ctx.font = '10px SimHei, Arial';
+  ctx.fillText(options.subtitle, x + 50, y + 38);
 }
 
 function getMainPanelFrame() {
@@ -1460,7 +1505,12 @@ function getMainPanelFrame() {
 }
 
 function getWelcomeLayout() {
-  const { panelX, panelY, panelW, panelH } = getMainPanelFrame();
+  const panelX = 16;
+  const panelW = SCREEN_WIDTH - 32;
+  const availableTop = SAFE_AREA_TOP + 10;
+  const availableH = SCREEN_HEIGHT - availableTop - 28;
+  const panelH = Math.min(availableH, 600);
+  const panelY = availableTop + Math.max(0, (availableH - panelH) / 2);
 
   const btnH = 48;
   const btnW = panelW - 28;
@@ -1644,6 +1694,48 @@ function getSettlementLayout() {
   };
 }
 
+function buildAiReview(winner, isForbidden, durationSec) {
+  const opponent = getCurrentOpponent();
+  const playerWon = winner === playerSide;
+  const totalMoves = game.moveCount;
+  const playerSkillLead = currentMatchStats.playerSkills - currentMatchStats.aiSkills;
+  const aiMpLead = game.mp[aiSide] - game.mp[playerSide];
+  const pace = durationSec <= 60 ? '快棋节奏' : (durationSec <= 180 ? '稳扎稳打' : '长盘拉扯');
+  const lines = [];
+
+  if (isForbidden) {
+    lines.push(playerWon
+      ? `${opponent.name}复盘：对手禁手送局，规则就是最后一刀。`
+      : `${opponent.name}复盘：黑棋禁手爆雷，这盘输在太贪。`);
+  } else if (playerWon) {
+    lines.push(`${opponent.name}复盘：你守住关键连线，收官那手够狠。`);
+  } else {
+    lines.push(`${opponent.name}复盘：我用连续威胁压缩空间，你慢了半拍。`);
+  }
+
+  if (playerSkillLead > 0) {
+    lines.push(`技能使用更主动，但别只靠绝学，先手形势也要经营。`);
+  } else if (playerSkillLead < 0) {
+    lines.push(`这局我技能压制更多，关键回合别舍不得内力。`);
+  } else {
+    lines.push(`双方技能出手接近，胜负主要落在连线攻防。`);
+  }
+
+  if (aiMpLead > 60) {
+    lines.push(`你留下太多内力没转化，下一局该更早抢节奏。`);
+  } else if (totalMoves >= 45) {
+    lines.push(`棋局拖入后半盘，防四和拆三要比抢边更重要。`);
+  } else {
+    lines.push(`${pace}里最怕漏防，看到活三先别急着反打。`);
+  }
+
+  return {
+    title: 'AI复盘',
+    tag: playerWon ? '可圈可点' : '下局再战',
+    lines
+  };
+}
+
 function buildSettlementData(winner, isForbidden) {
   const durationSec = Math.max(1, Math.round((Date.now() - currentMatchStats.startTime) / 1000));
 
@@ -1675,6 +1767,8 @@ function buildSettlementData(winner, isForbidden) {
     resultColor,
     durationSec,
     totalMoves: game.moveCount,
+    isPlayerWin: winner === playerSide,
+    review: buildAiReview(winner, isForbidden, durationSec),
     player: {
       moves: currentMatchStats.playerMoves,
       skills: currentMatchStats.playerSkills,
@@ -1703,34 +1797,71 @@ function formatDuration(durationSec) {
   return `${minutes}分${seconds}秒`;
 }
 
+function drawSettlementMetric(x, y, w, label, value, color) {
+  drawRoundedCard(x, y, w, 34, {
+    radius: 8,
+    fillStyle: 'rgba(17, 27, 34, 0.72)',
+    strokeStyle: 'rgba(215, 174, 120, 0.26)',
+    lineWidth: 1,
+    shadowBlur: 2,
+    shadowOffsetY: 1
+  });
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color || COLORS.gold;
+  ctx.font = 'bold 13px Arial';
+  ctx.fillText(String(value), x + w / 2, y + 12);
+  ctx.fillStyle = 'rgba(231, 225, 214, 0.75)';
+  ctx.font = '10px SimHei, Arial';
+  ctx.fillText(label, x + w / 2, y + 26);
+}
+
+function drawSettlementTextLines(lines, x, y, maxChars, lineGap) {
+  let lineY = y;
+  (lines || []).forEach(text => {
+    splitTipText(String(text), maxChars).forEach(line => {
+      ctx.fillText(line, x, lineY);
+      lineY += lineGap;
+    });
+  });
+}
+
 function drawSettlement() {
   const layout = getSettlementLayout();
   const { panelX, panelY, panelW, panelH, homeBtnX, replayBtnX, btnY, btnW, btnH } = layout;
   const data = gameState.settlementData;
   if (!data) return;
 
-  // 轻量蒙层（去掉大边框与厚背景）
   const maskGrad = ctx.createLinearGradient(0, 0, 0, SCREEN_HEIGHT);
-  maskGrad.addColorStop(0, 'rgba(0, 0, 0, 0.34)');
-  maskGrad.addColorStop(1, 'rgba(0, 0, 0, 0.48)');
+  maskGrad.addColorStop(0, 'rgba(6, 12, 16, 0.78)');
+  maskGrad.addColorStop(0.5, 'rgba(11, 18, 23, 0.64)');
+  maskGrad.addColorStop(1, 'rgba(0, 0, 0, 0.74)');
   ctx.fillStyle = maskGrad;
   ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = data.resultColor;
-  ctx.font = 'bold 32px KaiTi, STKaiti, SimHei, serif';
+  ctx.font = 'bold 34px KaiTi, STKaiti, SimHei, serif';
   ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
   ctx.shadowBlur = 8;
-  ctx.fillText(data.resultTitle, panelX + panelW / 2, panelY + 56);
+  ctx.fillText(data.resultTitle, panelX + panelW / 2, panelY + 44);
   ctx.shadowBlur = 0;
 
   ctx.fillStyle = 'rgba(231, 225, 214, 0.95)';
   ctx.font = '12px SimHei, Arial';
-  ctx.fillText(`用时 ${formatDuration(data.durationSec)} · 总手数 ${data.totalMoves}`, panelX + panelW / 2, panelY + 84);
+  ctx.fillText(`用时 ${formatDuration(data.durationSec)} · 总手数 ${data.totalMoves}`, panelX + panelW / 2, panelY + 73);
 
-  const boxY = panelY + 104;
-  const boxH = 124;
+  const metricY = panelY + 94;
+  const metricGap = 7;
+  const metricW = (panelW - 28 - metricGap * 2) / 3;
+  const metricX = panelX + 14;
+  drawSettlementMetric(metricX, metricY, metricW, '玩家技能', data.player.skills, COLORS.skill2);
+  drawSettlementMetric(metricX + metricW + metricGap, metricY, metricW, 'AI技能', data.ai.skills, COLORS.skill1);
+  drawSettlementMetric(metricX + (metricW + metricGap) * 2, metricY, metricW, '胜率', `${data.session.winRate}%`, COLORS.gold);
+
+  const boxY = metricY + 48;
+  const boxH = 82;
   const halfGap = 8;
   const boxW = (panelW - 28 - halfGap) / 2;
   const playerX = panelX + 14;
@@ -1750,37 +1881,52 @@ function drawSettlement() {
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  ctx.font = 'bold 13px SimHei, Arial';
+  ctx.font = 'bold 12px SimHei, Arial';
   ctx.fillStyle = COLORS.gold;
-  ctx.fillText(`玩家数据（${getSideText(playerSide)}）`, playerX + 10, boxY + 20);
-  ctx.fillText(`${getCurrentOpponent().name}数据（${getSideText(aiSide)}）`, aiX + 10, boxY + 20);
+  ctx.fillText(`玩家（${getSideText(playerSide)}）`, playerX + 10, boxY + 18);
+  ctx.fillText(`${getCurrentOpponent().name}（${getSideText(aiSide)}）`, aiX + 10, boxY + 18);
 
   ctx.font = '12px Arial';
   ctx.fillStyle = COLORS.text;
-  ctx.fillText(`落子：${data.player.moves}`, playerX + 10, boxY + 46);
-  ctx.fillText(`技能：${data.player.skills}`, playerX + 10, boxY + 70);
-  ctx.fillText(`剩余MP：${data.player.mp}`, playerX + 10, boxY + 94);
+  ctx.fillText(`落子 ${data.player.moves}`, playerX + 10, boxY + 42);
+  ctx.fillText(`内力 ${data.player.mp}/200`, playerX + 10, boxY + 64);
 
-  ctx.fillText(`落子：${data.ai.moves}`, aiX + 10, boxY + 46);
-  ctx.fillText(`技能：${data.ai.skills}`, aiX + 10, boxY + 70);
-  ctx.fillText(`剩余MP：${data.ai.mp}`, aiX + 10, boxY + 94);
+  ctx.fillText(`落子 ${data.ai.moves}`, aiX + 10, boxY + 42);
+  ctx.fillText(`内力 ${data.ai.mp}/200`, aiX + 10, boxY + 64);
 
-  const statY = boxY + boxH + 12;
-  const statH = 94;
-  drawRoundedCard(panelX + 14, statY, panelW - 28, statH, {
+  const reviewY = boxY + boxH + 12;
+  const reviewH = 132;
+  drawRoundedCard(panelX + 14, reviewY, panelW - 28, reviewH, {
     radius: 12,
-    fillStyle: 'rgba(10, 18, 23, 0.64)',
-    strokeStyle: 'rgba(215, 174, 120, 0.4)',
-    lineWidth: 1
+    fillStyle: 'rgba(13, 23, 29, 0.78)',
+    strokeStyle: 'rgba(215, 174, 120, 0.48)',
+    lineWidth: 1.1,
+    shadowBlur: 6
   });
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = COLORS.gold;
-  ctx.font = 'bold 13px SimHei, Arial';
-  ctx.fillText('局数统计', panelX + 24, statY + 20);
+  ctx.font = 'bold 14px SimHei, Arial';
+  ctx.fillText(`${getCurrentOpponent().avatar} ${data.review.title}`, panelX + 26, reviewY + 24);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = data.isPlayerWin ? COLORS.skill2 : COLORS.skill1;
+  ctx.font = 'bold 11px SimHei, Arial';
+  ctx.fillText(data.review.tag, panelX + panelW - 26, reviewY + 24);
+  ctx.textAlign = 'left';
   ctx.fillStyle = COLORS.text;
-  ctx.font = '12px Arial';
-  ctx.fillText(`总局数：${data.session.rounds}`, panelX + 24, statY + 42);
-  ctx.fillText(`胜 / 负：${data.session.playerWins} / ${data.session.aiWins}`, panelX + 24, statY + 62);
-  ctx.fillText(`胜率：${data.session.winRate}%    禁手负场：${data.session.forbiddenLosses}`, panelX + 24, statY + 82);
+  ctx.font = '12px SimHei, Arial';
+  drawSettlementTextLines(data.review.lines, panelX + 26, reviewY + 49, 24, 18);
+
+  const statY = reviewY + reviewH + 10;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(231, 225, 214, 0.82)';
+  ctx.font = '11px SimHei, Arial';
+  ctx.fillText(
+    `总局 ${data.session.rounds} · 胜/负 ${data.session.playerWins}/${data.session.aiWins} · 禁手负 ${data.session.forbiddenLosses}`,
+    panelX + panelW / 2,
+    statY + 8
+  );
 
   // 回到主页按钮
   drawRoundedCard(homeBtnX, btnY, btnW, btnH, {
