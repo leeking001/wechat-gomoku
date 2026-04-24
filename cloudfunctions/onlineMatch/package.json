@@ -1,0 +1,9 @@
+{
+  "name": "onlineMatch",
+  "version": "1.0.0",
+  "description": "Online match room sync for 真技能五子棋",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "latest"
+  }
+}

@@ -24,6 +24,7 @@ let gameState = {
   showSidePicker: false,
   showSettlement: false,
   settlementData: null,
+  settlementReviewScroll: 0,
   showGuide: false,
   guideScroll: 0
 };
@@ -34,12 +35,25 @@ let skillButtons = [];
 let musicPlaying = true;
 let soundEnabled = true;
 let boardRect = null; // 用于存储棋盘位置
+let matchExitButton = null;
+let settlementReviewBox = null;
+let settlementReviewTouching = false;
 let aiThinking = false; // 防止AI重复思考
 
 // 欢迎页 Logo 资源
 let welcomeLogo = null;
 let welcomeLogoLoaded = false;
 let welcomeLogoLoading = false;
+let nicknameInputCallback = null;
+let nicknameInputWatcher = null;
+let nicknameDialog = {
+  visible: false,
+  text: '',
+  next: null,
+  inputBox: null,
+  cancelBtn: null,
+  confirmBtn: null
+};
 
 // 技能动画状态
 let skillAnimation = null;
@@ -175,7 +189,8 @@ let currentMatchStats = {
   playerMoves: 0,
   aiMoves: 0,
   playerSkills: 0,
-  aiSkills: 0
+  aiSkills: 0,
+  skillLog: []
 };
 
 let sessionStats = {
@@ -190,6 +205,29 @@ let sessionStats = {
 let playerSide = BLACK;
 let aiSide = WHITE;
 let currentOpponentId = 'student';
+let welcomeMode = 'ai';
+let localPlayerProfile = {
+  nickName: '玩家',
+  avatar: '🧑'
+};
+let onlineDb = null;
+let onlineMatch = {
+  enabled: false,
+  roomId: '',
+  role: '',
+  status: 'offline',
+  localPlayerId: '',
+  lastVersion: 0,
+  lastActionKey: '',
+  pollTimer: null,
+  settlementHandled: false,
+  hasOpponent: false,
+  statusHint: '',
+  hostName: '',
+  guestName: ''
+};
+
+const CLOUD_ENV_ID = 'cloud1-d0gq3gtj55276ee2f';
 
 function setPlayerSide(side) {
   playerSide = side === WHITE ? WHITE : BLACK;
@@ -200,13 +238,232 @@ function getSideText(side) {
   return side === BLACK ? '黑子' : '白子';
 }
 
+function sanitizeDisplayName(name, fallback) {
+  const text = String(name || '').trim();
+  return text ? text.slice(0, 10) : fallback;
+}
+
+function getLocalPlayerName() {
+  return sanitizeDisplayName(localPlayerProfile.nickName, '玩家');
+}
+
+function getOnlineOpponentName() {
+  if (!onlineMatch.enabled) return getCurrentOpponent().name;
+  const name = playerSide === BLACK ? onlineMatch.guestName : onlineMatch.hostName;
+  return sanitizeDisplayName(name, '好友');
+}
+
 function getCurrentOpponent() {
+  if (onlineMatch.enabled) {
+    return {
+      id: 'friend',
+      name: getOnlineOpponentName(),
+      avatar: '🧑',
+      intro: '真人对局，少点套路，多点杀气。',
+      taunts: ['这手我可不让你。']
+    };
+  }
   return OPPONENT_PROFILES[currentOpponentId] || OPPONENT_PROFILES.demon;
+}
+
+function loadCachedUserProfile() {
+  try {
+    const cached = wx.getStorageSync('localPlayerProfile');
+    if (cached && cached.nickName) {
+      localPlayerProfile.nickName = sanitizeDisplayName(cached.nickName, '玩家');
+      localPlayerProfile.avatar = cached.avatar || localPlayerProfile.avatar;
+    }
+  } catch (e) {
+    console.log('[WARN] 读取玩家昵称缓存失败:', e);
+  }
+}
+
+function saveLocalUserProfile(profile) {
+  if (!profile) return;
+  localPlayerProfile = {
+    nickName: sanitizeDisplayName(profile.nickName || profile.name, '玩家'),
+    avatar: profile.avatar || localPlayerProfile.avatar || '🧑'
+  };
+  try {
+    wx.setStorageSync('localPlayerProfile', localPlayerProfile);
+  } catch (e) {
+    console.log('[WARN] 保存玩家昵称失败:', e);
+  }
+}
+
+function syncLocalUserProfileToServer() {
+  const playerName = getLocalPlayerName();
+  if (playerName === '玩家' || !wx.cloud || typeof wx.cloud.callFunction !== 'function') return;
+  try {
+    if (!onlineDb) {
+      wx.cloud.init({ env: CLOUD_ENV_ID, traceUser: true });
+      onlineDb = wx.cloud.database ? wx.cloud.database({ env: CLOUD_ENV_ID }) : {};
+    }
+    callOnlineFunction('saveUser', {
+      playerId: getOnlinePlayerId(),
+      playerName
+    }).catch(err => {
+      console.log('[WARN] 同步玩家昵称失败:', err);
+    });
+  } catch (e) {
+    console.log('[WARN] 初始化昵称同步失败:', e);
+  }
+}
+
+function ensureLocalUserProfile() {
+  loadCachedUserProfile();
+  return Promise.resolve(localPlayerProfile);
+}
+
+function isLocalPlayerNamed() {
+  return getLocalPlayerName() !== '玩家';
+}
+
+function showNicknameRequiredToast() {
+  if (wx.showToast) {
+    wx.showToast({
+      title: '请先输入游戏昵称',
+      icon: 'none',
+      duration: 1600
+    });
+  } else {
+    console.log('[WARN] 请先输入昵称');
+  }
+}
+
+function getWelcomeStartText() {
+  return welcomeMode === 'ai' ? '开始AI对战' : '邀请好友';
+}
+
+function proceedWelcomeStart() {
+  if (welcomeMode === 'friend') {
+    audioManager.playSound('click');
+    createOnlineRoom();
+    return;
+  }
+
+  audioManager.playSound('click');
+  stopOnlinePolling();
+  onlineMatch.enabled = false;
+  gameState.showWelcome = false;
+  gameState.showGuide = false;
+  gameState.showSidePicker = true;
+  initAudioForGame();
+  clearSystemMessage();
+  drawGame();
+}
+
+function unbindNicknameKeyboard() {
+  if (nicknameInputCallback && wx.offKeyboardConfirm) {
+    wx.offKeyboardConfirm(nicknameInputCallback);
+  }
+  if (nicknameInputWatcher && wx.offKeyboardInput) {
+    wx.offKeyboardInput(nicknameInputWatcher);
+  }
+  nicknameInputCallback = null;
+  nicknameInputWatcher = null;
+}
+
+function closeNicknameDialog() {
+  unbindNicknameKeyboard();
+  nicknameDialog.visible = false;
+  nicknameDialog.text = '';
+  nicknameDialog.next = null;
+  nicknameDialog.inputBox = null;
+  nicknameDialog.cancelBtn = null;
+  nicknameDialog.confirmBtn = null;
+  if (wx.hideKeyboard) {
+    try {
+      wx.hideKeyboard();
+    } catch (e) {}
+  }
+  drawGame();
+}
+
+function confirmNicknameDialog() {
+  const nickName = sanitizeDisplayName(nicknameDialog.text, '');
+  if (!nickName) {
+    showNicknameRequiredToast();
+    return;
+  }
+  const next = nicknameDialog.next;
+  saveLocalUserProfile({ nickName });
+  syncLocalUserProfileToServer();
+  closeNicknameDialog();
+  if (typeof next === 'function') {
+    next();
+  }
+}
+
+function bindNicknameKeyboardHandlers() {
+  unbindNicknameKeyboard();
+  nicknameInputCallback = res => {
+    nicknameDialog.text = sanitizeDisplayName(res && res.value ? res.value : '', '');
+    drawGame();
+    if (wx.hideKeyboard) {
+      try {
+        wx.hideKeyboard();
+      } catch (e) {}
+    }
+  };
+  nicknameInputWatcher = res => {
+    const value = res && res.value ? String(res.value) : '';
+    const nextValue = value.slice(0, 10);
+    if (value.length > 10 && wx.updateKeyboard) {
+      wx.updateKeyboard({ value: nextValue });
+    }
+    nicknameDialog.text = nextValue;
+    drawGame();
+  };
+  if (wx.onKeyboardConfirm) wx.onKeyboardConfirm(nicknameInputCallback);
+  if (wx.onKeyboardInput) wx.onKeyboardInput(nicknameInputWatcher);
+}
+
+function openNicknameDialog(next) {
+  nicknameDialog.visible = true;
+  nicknameDialog.text = '';
+  nicknameDialog.next = next;
+  drawGame();
+}
+
+function showNicknameKeyboard() {
+  if (!wx.showKeyboard) {
+    showNicknameRequiredToast();
+    return;
+  }
+  bindNicknameKeyboardHandlers();
+  wx.showKeyboard({
+    defaultValue: nicknameDialog.text || '',
+    maxLength: 10,
+    multiple: false,
+    confirmHold: false,
+    confirmType: 'done',
+    success: () => {},
+    fail: err => {
+      console.log('[WARN] 打开昵称输入失败:', err);
+      showNicknameRequiredToast();
+    }
+  });
+}
+
+function requestLocalNicknameThen(next) {
+  loadCachedUserProfile();
+  if (isLocalPlayerNamed()) {
+    syncLocalUserProfileToServer();
+    next();
+    return;
+  }
+  if (!wx.showKeyboard) {
+    showNicknameRequiredToast();
+    return;
+  }
+  openNicknameDialog(next);
 }
 
 // 触摸跟踪 - 用于说明书滚动
 let touchStartY = 0;
 let touchStartGuideScroll = 0;
+let touchStartSettlementScroll = 0;
 
 // 音频上下文
 let bgMusic = null; // 背景音乐
@@ -391,9 +648,9 @@ const BOARD_MARGIN = 12;
 const SKILL_BAR_HEIGHT = 138;
 const PLAYER_INFO_HEIGHT = 80;
 const AI_PANEL_PADDING = 8;
-const TOP_LEFT_BTN_W = 42;
-const TOP_LEFT_BTN_H = 40;
-const TOP_LEFT_BTN_GAP = 8;
+const TOP_LEFT_BTN_W = 34;
+const TOP_LEFT_BTN_H = 34;
+const TOP_LEFT_BTN_GAP = 5;
 
 // 颜色定义
 const COLORS = {
@@ -610,6 +867,34 @@ function getLastMoveOf(player) {
     if (move.player === player) return move;
   }
   return null;
+}
+
+function getLastOpponentMove() {
+  if (!game || !Array.isArray(game.moveHistory)) return null;
+  for (let i = game.moveHistory.length - 1; i >= 0; i--) {
+    const move = game.moveHistory[i];
+    if (move.player !== playerSide && game.board[move.row] && game.board[move.row][move.col] === move.player) {
+      return move;
+    }
+  }
+  return null;
+}
+
+function drawLastOpponentMoveHint(boardX, boardY) {
+  const move = getLastOpponentMove();
+  if (!move || shouldHideBoardPiece(move.row, move.col)) return;
+
+  const x = boardX + GRID_OFFSET + move.col * CELL_SIZE;
+  const y = boardY + GRID_OFFSET + move.row * CELL_SIZE;
+
+  ctx.save();
+  ctx.fillStyle = '#d83a2e';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.38)';
+  ctx.shadowBlur = 2;
+  ctx.beginPath();
+  ctx.arc(x, y, 3.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 function clearTauntTip() {
@@ -1190,8 +1475,37 @@ function initAudioForGame() {
   }
 }
 
+function setupCanvas() {
+  const targetWidth = Math.ceil(SCREEN_WIDTH * PIXEL_RATIO);
+  const targetHeight = Math.ceil(SCREEN_HEIGHT * PIXEL_RATIO);
+
+  if (!canvas) {
+    canvas = wx.createCanvas();
+  }
+
+  if (!ctx || canvas.width !== targetWidth || canvas.height !== targetHeight) {
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    ctx = canvas.getContext('2d');
+    if (ctx.setTransform) {
+      ctx.setTransform(PIXEL_RATIO, 0, 0, PIXEL_RATIO, 0, 0);
+    } else {
+      ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
+    }
+    ctx.imageSmoothingEnabled = true;
+
+    console.log('[DEBUG] Canvas高清尺寸已校准:', {
+      logicalSize: `${SCREEN_WIDTH}×${SCREEN_HEIGHT}`,
+      physicalSize: `${canvas.width}×${canvas.height}`,
+      ratio: PIXEL_RATIO
+    });
+  }
+}
+
 // 初始化游戏
 function initGame(showWelcome = true) {
+  resetOnlineMatchState();
+  loadCachedUserProfile();
   clearSkillAnimation();
   clearTauntTip();
   clearWinningHighlight();
@@ -1201,6 +1515,7 @@ function initGame(showWelcome = true) {
   game = new SkillGomoku();
   if (showWelcome) {
     currentOpponentId = 'student';
+    welcomeMode = 'ai';
   }
   boardRect = null;
   skillButtons = [];
@@ -1220,6 +1535,7 @@ function initGame(showWelcome = true) {
     showSidePicker: !showWelcome,
     showSettlement: false,
     settlementData: null,
+    settlementReviewScroll: 0,
     showGuide: false,
     guideScroll: 0
   };
@@ -1239,28 +1555,11 @@ function initGame(showWelcome = true) {
     playerMoves: 0,
     aiMoves: 0,
     playerSkills: 0,
-    aiSkills: 0
+    aiSkills: 0,
+    skillLog: []
   };
 
-  // 只在第一次初始化时创建 canvas
-  if (!canvas) {
-    canvas = wx.createCanvas();
-    ctx = canvas.getContext('2d');
-
-    // 设置高清屏支持
-    // 物理像素 = 逻辑像素 × pixelRatio
-    canvas.width = SCREEN_WIDTH * PIXEL_RATIO;
-    canvas.height = SCREEN_HEIGHT * PIXEL_RATIO;
-
-    // 缩放绘图上下文,使得绘图代码可以使用逻辑像素
-    ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
-
-    console.log('[DEBUG] Canvas已创建:', {
-      logicalSize: `${SCREEN_WIDTH}×${SCREEN_HEIGHT}`,
-      physicalSize: `${canvas.width}×${canvas.height}`,
-      ratio: PIXEL_RATIO
-    });
-  }
+  setupCanvas();
 
   loadWelcomeLogo();
   if (!showWelcome) {
@@ -1272,18 +1571,27 @@ function initGame(showWelcome = true) {
   ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 
   drawGame();
+  if (gameState.showWelcome) {
+    setTimeout(() => {
+      if (gameState.showWelcome) {
+        setupCanvas();
+        drawGame();
+      }
+    }, 80);
+  }
   if (!gameState.showWelcome && !gameState.showSidePicker) {
     showSystemMessage('江湖路远 请赐教', '#d4a574', 1600);
     if (!gameState.gameOver && gameState.turn === aiSide) {
-      setTimeout(() => {
-        aiMove();
-      }, 760);
+      scheduleAiMove();
     }
   }
 }
 
 // 绘制整个游戏
 function drawGame() {
+  matchExitButton = null;
+  settlementReviewBox = null;
+
   // 背景层：纵向墨色渐变 + 细纹理
   const bgGradient = ctx.createLinearGradient(0, 0, 0, SCREEN_HEIGHT);
   bgGradient.addColorStop(0, '#141f26');
@@ -1316,6 +1624,9 @@ function drawGame() {
 
   if (gameState.showWelcome) {
     drawWelcome();
+    if (nicknameDialog.visible) {
+      drawNicknameDialog();
+    }
     return;
   }
 
@@ -1355,6 +1666,15 @@ function drawTopBar() {
   ctx.shadowBlur = 4;
   ctx.fillText('真技能五子棋', SCREEN_WIDTH / 2, titleY);
   ctx.shadowBlur = 0;
+
+  if (onlineMatch.enabled) {
+    const statusText = onlineMatch.status === 'waiting'
+      ? '联机房间：等待好友'
+      : `联机对战 · 你执${getSideText(playerSide).replace('子', '')}`;
+    ctx.fillStyle = 'rgba(231, 225, 214, 0.78)';
+    ctx.font = '11px SimHei, Arial';
+    ctx.fillText(statusText, SCREEN_WIDTH / 2, titleY + 24);
+  }
 
   drawTopToolButton(topBtns.music, musicPlaying);
   drawTopToolButton(topBtns.guide, true);
@@ -1523,8 +1843,15 @@ function getWelcomeLayout() {
   const logoX = panelX + 24;
   const logoW = panelW - 48;
   const logoY = subtitleY + 14;
-  const opponentTitleY = btnY - 126;
-  const maxLogoH = opponentTitleY - logoY - 98;
+  const modeTitleY = btnY - 178;
+  const modeBtnY = modeTitleY + 16;
+  const modeBtnGap = 8;
+  const modeBtnW = (panelW - 28 - modeBtnGap) / 2;
+  const modeAiX = panelX + 14;
+  const modeFriendX = modeAiX + modeBtnW + modeBtnGap;
+  const modeBtnH = 40;
+  const opponentTitleY = modeBtnY + modeBtnH + 22;
+  const maxLogoH = modeTitleY - logoY - 84;
   const logoH = Math.max(72, Math.min(206, maxLogoH));
   const textStartY = logoY + logoH + 24;
   const textLineGap = 18;
@@ -1544,6 +1871,12 @@ function getWelcomeLayout() {
     logoH,
     textStartY,
     textLineGap,
+    modeTitleY,
+    modeBtnY,
+    modeAiX,
+    modeFriendX,
+    modeBtnW,
+    modeBtnH,
     opponentTitleY,
     opponentGridY,
     opponentIntroY,
@@ -1575,13 +1908,33 @@ function getWelcomeOpponentButtons(layout) {
   return buttons;
 }
 
+function drawWelcomeModeButton(x, y, w, h, mode, title, subtitle) {
+  const selected = welcomeMode === mode;
+  drawRoundedCard(x, y, w, h, {
+    radius: 10,
+    fillStyle: selected ? 'rgba(215, 174, 120, 0.28)' : 'rgba(24, 37, 47, 0.72)',
+    strokeStyle: selected ? 'rgba(242, 218, 176, 0.92)' : 'rgba(130, 153, 172, 0.42)',
+    lineWidth: selected ? 1.4 : 1,
+    shadowBlur: selected ? 5 : 2
+  });
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = selected ? '#fff3db' : 'rgba(231, 238, 244, 0.9)';
+  ctx.font = 'bold 13px SimHei, Arial';
+  ctx.fillText(title, x + w / 2, y + 15);
+  ctx.fillStyle = selected ? 'rgba(255, 243, 219, 0.76)' : 'rgba(214, 225, 235, 0.66)';
+  ctx.font = '9px SimHei, Arial';
+  ctx.fillText(subtitle, x + w / 2, y + 30);
+}
+
 function drawWelcome() {
   const layout = getWelcomeLayout();
   const {
     panelX, panelY, panelW, panelH,
     titleY, subtitleY,
     logoX, logoY, logoW, logoH,
-    textStartY, textLineGap, opponentTitleY, opponentIntroY, startBtnX, btnY, btnW, btnH
+    textStartY, textLineGap, modeTitleY, modeBtnY, modeAiX, modeFriendX, modeBtnW, modeBtnH,
+    opponentTitleY, opponentIntroY, startBtnX, btnY, btnW, btnH
   } = layout;
   const topBtns = getInGameTopButtonsLayout();
 
@@ -1632,34 +1985,48 @@ function drawWelcome() {
   ctx.textBaseline = 'middle';
   ctx.fillStyle = COLORS.gold;
   ctx.font = 'bold 14px SimHei, Arial';
-  ctx.fillText('选择对手', panelX + panelW / 2, opponentTitleY);
+  ctx.fillText('选择模式', panelX + panelW / 2, modeTitleY);
+  drawWelcomeModeButton(modeAiX, modeBtnY, modeBtnW, modeBtnH, 'ai', '跟AI对战', '选五档对手');
+  drawWelcomeModeButton(modeFriendX, modeBtnY, modeBtnW, modeBtnH, 'friend', '跟好友对战', '分享开房间');
 
-  const opponentButtons = getWelcomeOpponentButtons(layout);
-  opponentButtons.forEach(btn => {
-    const profile = OPPONENT_PROFILES[btn.id];
-    const selected = btn.id === currentOpponentId;
-    drawRoundedCard(btn.x, btn.y, btn.w, btn.h, {
-      radius: 10,
-      fillStyle: selected ? 'rgba(215, 174, 120, 0.28)' : 'rgba(26, 40, 50, 0.7)',
-      strokeStyle: selected ? 'rgba(242, 218, 176, 0.9)' : 'rgba(130, 153, 172, 0.46)',
-      lineWidth: selected ? 1.4 : 1
+  if (welcomeMode === 'ai') {
+    ctx.fillStyle = COLORS.gold;
+    ctx.font = 'bold 14px SimHei, Arial';
+    ctx.fillText('选择对手', panelX + panelW / 2, opponentTitleY);
+
+    const opponentButtons = getWelcomeOpponentButtons(layout);
+    opponentButtons.forEach(btn => {
+      const profile = OPPONENT_PROFILES[btn.id];
+      const selected = btn.id === currentOpponentId;
+      drawRoundedCard(btn.x, btn.y, btn.w, btn.h, {
+        radius: 10,
+        fillStyle: selected ? 'rgba(215, 174, 120, 0.28)' : 'rgba(26, 40, 50, 0.7)',
+        strokeStyle: selected ? 'rgba(242, 218, 176, 0.9)' : 'rgba(130, 153, 172, 0.46)',
+        lineWidth: selected ? 1.4 : 1
+      });
+      ctx.fillStyle = selected ? '#fff3db' : 'rgba(231, 238, 244, 0.9)';
+      ctx.font = selected ? 'bold 12px SimHei, Arial' : '11px SimHei, Arial';
+      ctx.fillText(`${profile.avatar} ${profile.name}`, btn.x + btn.w / 2, btn.y + btn.h / 2);
     });
-    ctx.fillStyle = selected ? '#fff3db' : 'rgba(231, 238, 244, 0.9)';
-    ctx.font = selected ? 'bold 12px SimHei, Arial' : '11px SimHei, Arial';
-    ctx.fillText(`${profile.avatar} ${profile.name}`, btn.x + btn.w / 2, btn.y + btn.h / 2);
-  });
 
-  const selectedProfile = getCurrentOpponent();
-  ctx.fillStyle = 'rgba(231, 223, 209, 0.92)';
-  ctx.font = '11px SimHei, Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(selectedProfile.intro || '', panelX + panelW / 2, opponentIntroY);
+    const selectedProfile = getCurrentOpponent();
+    ctx.fillStyle = 'rgba(231, 223, 209, 0.92)';
+    ctx.font = '11px SimHei, Arial';
+    ctx.fillText(selectedProfile.intro || '', panelX + panelW / 2, opponentIntroY);
+  } else {
+    ctx.fillStyle = COLORS.gold;
+    ctx.font = 'bold 14px SimHei, Arial';
+    ctx.fillText('好友房间', panelX + panelW / 2, opponentTitleY);
+    ctx.fillStyle = 'rgba(231, 223, 209, 0.9)';
+    ctx.font = '12px SimHei, Arial';
+    ctx.fillText('你执黑创建房间，好友点开分享后执白加入', panelX + panelW / 2, layout.opponentGridY + 4);
+    ctx.fillText('双方联机对战，终局自动保存战绩', panelX + panelW / 2, opponentIntroY);
+  }
 
   // 开始按钮
   drawRoundedCard(startBtnX, btnY, btnW, btnH, {
     radius: 12,
-    fillStyle: 'rgba(111, 139, 116, 0.95)',
+    fillStyle: welcomeMode === 'ai' ? 'rgba(111, 139, 116, 0.95)' : 'rgba(96, 123, 143, 0.95)',
     strokeStyle: 'rgba(236, 244, 232, 0.88)',
     lineWidth: 1.4,
     shadowBlur: 6
@@ -1668,24 +2035,116 @@ function drawWelcome() {
   ctx.font = 'bold 16px SimHei, Arial';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('开始对局', startBtnX + btnW / 2, btnY + btnH / 2);
+  ctx.fillText(getWelcomeStartText(), startBtnX + btnW / 2, btnY + btnH / 2);
+}
+
+function drawNicknameDialog() {
+  const panelW = Math.min(SCREEN_WIDTH - 52, 340);
+  const panelH = 174;
+  const panelX = (SCREEN_WIDTH - panelW) / 2;
+  const panelY = Math.max(SAFE_AREA_TOP + 88, (SCREEN_HEIGHT - panelH) / 2 - 40);
+  const inputX = panelX + 18;
+  const inputY = panelY + 56;
+  const inputW = panelW - 36;
+  const inputH = 44;
+  const btnY = panelY + panelH - 54;
+  const btnGap = 12;
+  const btnW = (panelW - 36 - btnGap) / 2;
+  const cancelX = panelX + 18;
+  const confirmX = cancelX + btnW + btnGap;
+
+  nicknameDialog.inputBox = { x: inputX, y: inputY, w: inputW, h: inputH };
+  nicknameDialog.cancelBtn = { x: cancelX, y: btnY, w: btnW, h: 36 };
+  nicknameDialog.confirmBtn = { x: confirmX, y: btnY, w: btnW, h: 36 };
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.56)';
+  ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+  drawRoundedCard(panelX, panelY, panelW, panelH, {
+    radius: 16,
+    fillStyle: 'rgba(15, 24, 31, 0.98)',
+    strokeStyle: 'rgba(215, 174, 120, 0.82)',
+    lineWidth: 1.5,
+    shadowBlur: 10
+  });
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#f5d59f';
+  ctx.font = 'bold 18px SimHei, Arial';
+  ctx.fillText('输入游戏昵称', panelX + panelW / 2, panelY + 26);
+
+  drawRoundedCard(inputX, inputY, inputW, inputH, {
+    radius: 12,
+    fillStyle: 'rgba(26, 37, 46, 0.92)',
+    strokeStyle: 'rgba(130, 153, 172, 0.5)',
+    lineWidth: 1.2
+  });
+  ctx.textAlign = 'left';
+  ctx.fillStyle = nicknameDialog.text ? '#f5efe2' : 'rgba(214, 225, 235, 0.52)';
+  ctx.font = 'bold 14px SimHei, Arial';
+  ctx.fillText(nicknameDialog.text || '点击输入游戏昵称', inputX + 14, inputY + inputH / 2);
+
+  drawRoundedCard(cancelX, btnY, btnW, 36, {
+    radius: 10,
+    fillStyle: 'rgba(44, 56, 66, 0.86)',
+    strokeStyle: 'rgba(130, 153, 172, 0.46)',
+    lineWidth: 1
+  });
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(231, 238, 244, 0.88)';
+  ctx.font = 'bold 14px SimHei, Arial';
+  ctx.fillText('取消', cancelX + btnW / 2, btnY + 18);
+
+  drawRoundedCard(confirmX, btnY, btnW, 36, {
+    radius: 10,
+    fillStyle: 'rgba(111, 139, 116, 0.94)',
+    strokeStyle: 'rgba(236, 244, 232, 0.72)',
+    lineWidth: 1
+  });
+  ctx.fillStyle = '#f5efe2';
+  ctx.fillText('确认', confirmX + btnW / 2, btnY + 18);
 }
 
 function getSettlementLayout() {
   const { panelX, panelY, panelW, panelH } = getMainPanelFrame();
 
-  const btnH = 44;
-  const btnGap = 10;
+  const btnH = 48;
+  const btnGap = 12;
   const btnW = (panelW - 28 - btnGap) / 2;
   const homeBtnX = panelX + 14;
   const replayBtnX = homeBtnX + btnW + btnGap;
-  const btnY = panelY + panelH - btnH - 14;
+  const btnY = panelY + panelH - btnH - 6;
+
+  const titleY = panelY + 38;
+  const subtitleY = titleY + 46;
+  const reportY = subtitleY + 26;
+  const boxY = reportY + 56;
+  const boxH = 116;
+  const reviewY = boxY + boxH + 14;
+  const statBoxH = 32;
+  const statBoxY = btnY - 46;
+  const statY = statBoxY + statBoxH / 2;
+  const reviewH = Math.max(118, statBoxY - reviewY - 12);
+  const reportH = statBoxY + statBoxH - reportY + 10;
 
   return {
     panelX,
     panelY,
     panelW,
     panelH,
+    titleY,
+    subtitleY,
+    reportY,
+    reportH,
+    boxY,
+    boxH,
+    reviewY,
+    reviewH,
+    statBoxY,
+    statBoxH,
+    statY,
     homeBtnX,
     replayBtnX,
     btnY,
@@ -1694,53 +2153,17 @@ function getSettlementLayout() {
   };
 }
 
-function buildAiReview(winner, isForbidden, durationSec) {
-  const opponent = getCurrentOpponent();
-  const playerWon = winner === playerSide;
-  const totalMoves = game.moveCount;
-  const playerSkillLead = currentMatchStats.playerSkills - currentMatchStats.aiSkills;
-  const aiMpLead = game.mp[aiSide] - game.mp[playerSide];
-  const pace = durationSec <= 60 ? '快棋节奏' : (durationSec <= 180 ? '稳扎稳打' : '长盘拉扯');
-  const lines = [];
-
-  if (isForbidden) {
-    lines.push(playerWon
-      ? `${opponent.name}复盘：对手禁手送局，规则就是最后一刀。`
-      : `${opponent.name}复盘：黑棋禁手爆雷，这盘输在太贪。`);
-  } else if (playerWon) {
-    lines.push(`${opponent.name}复盘：你守住关键连线，收官那手够狠。`);
-  } else {
-    lines.push(`${opponent.name}复盘：我用连续威胁压缩空间，你慢了半拍。`);
-  }
-
-  if (playerSkillLead > 0) {
-    lines.push(`技能使用更主动，但别只靠绝学，先手形势也要经营。`);
-  } else if (playerSkillLead < 0) {
-    lines.push(`这局我技能压制更多，关键回合别舍不得内力。`);
-  } else {
-    lines.push(`双方技能出手接近，胜负主要落在连线攻防。`);
-  }
-
-  if (aiMpLead > 60) {
-    lines.push(`你留下太多内力没转化，下一局该更早抢节奏。`);
-  } else if (totalMoves >= 45) {
-    lines.push(`棋局拖入后半盘，防四和拆三要比抢边更重要。`);
-  } else {
-    lines.push(`${pace}里最怕漏防，看到活三先别急着反打。`);
-  }
-
-  return {
-    title: 'AI复盘',
-    tag: playerWon ? '可圈可点' : '下局再战',
-    lines
-  };
+function buildAiReview(winner, isForbidden, durationSec, winLine) {
+  return buildTechnicalReview(winner, isForbidden, durationSec, winLine);
 }
 
-function buildSettlementData(winner, isForbidden) {
+function buildSettlementData(winner, isForbidden, winLine = null) {
   const durationSec = Math.max(1, Math.round((Date.now() - currentMatchStats.startTime) / 1000));
+  const playerMoveCount = countMovesBySide(playerSide);
+  const opponentMoveCount = countMovesBySide(aiSide);
 
   sessionStats.totalRounds += 1;
-  sessionStats.totalMoves += game.moveCount;
+  sessionStats.totalMoves += game.moveHistory && game.moveHistory.length ? game.moveHistory.length : game.moveCount;
   sessionStats.totalDurationSec += durationSec;
   if (winner === playerSide) {
     sessionStats.playerWins += 1;
@@ -1766,16 +2189,17 @@ function buildSettlementData(winner, isForbidden) {
     resultTitle,
     resultColor,
     durationSec,
-    totalMoves: game.moveCount,
+    totalMoves: game.moveHistory && game.moveHistory.length ? game.moveHistory.length : game.moveCount,
     isPlayerWin: winner === playerSide,
-    review: buildAiReview(winner, isForbidden, durationSec),
+    isOnline: onlineMatch.enabled,
+    review: buildAiReview(winner, isForbidden, durationSec, winLine),
     player: {
-      moves: currentMatchStats.playerMoves,
+      moves: playerMoveCount,
       skills: currentMatchStats.playerSkills,
       mp: game.mp[playerSide]
     },
     ai: {
-      moves: currentMatchStats.aiMoves,
+      moves: opponentMoveCount,
       skills: currentMatchStats.aiSkills,
       mp: game.mp[aiSide]
     },
@@ -1798,8 +2222,8 @@ function formatDuration(durationSec) {
 }
 
 function drawSettlementMetric(x, y, w, label, value, color) {
-  drawRoundedCard(x, y, w, 34, {
-    radius: 8,
+  drawRoundedCard(x, y, w, 40, {
+    radius: 10,
     fillStyle: 'rgba(17, 27, 34, 0.72)',
     strokeStyle: 'rgba(215, 174, 120, 0.26)',
     lineWidth: 1,
@@ -1809,26 +2233,234 @@ function drawSettlementMetric(x, y, w, label, value, color) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = color || COLORS.gold;
-  ctx.font = 'bold 13px Arial';
-  ctx.fillText(String(value), x + w / 2, y + 12);
+  ctx.font = 'bold 16px Arial';
+  ctx.fillText(String(value), x + w / 2, y + 14);
   ctx.fillStyle = 'rgba(231, 225, 214, 0.75)';
-  ctx.font = '10px SimHei, Arial';
-  ctx.fillText(label, x + w / 2, y + 26);
+  ctx.font = '11px SimHei, Arial';
+  ctx.fillText(label, x + w / 2, y + 30);
 }
 
-function drawSettlementTextLines(lines, x, y, maxChars, lineGap) {
+function fitTextByWidth(text, maxWidth) {
+  const source = String(text || '');
+  if (ctx.measureText(source).width <= maxWidth) return source;
+  for (let i = source.length - 1; i > 0; i--) {
+    const candidate = `${source.slice(0, i)}…`;
+    if (ctx.measureText(candidate).width <= maxWidth) return candidate;
+  }
+  return '…';
+}
+
+function splitTextByWidth(text, maxWidth) {
+  const source = String(text || '');
+  if (!source) return [''];
+  const lines = [];
+  let current = '';
+  for (let i = 0; i < source.length; i++) {
+    const next = current + source[i];
+    if (current && ctx.measureText(next).width > maxWidth) {
+      lines.push(current);
+      current = source[i];
+    } else {
+      current = next;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function getWrappedTextLines(lines, maxWidth) {
+  const wrapped = [];
+  (lines || []).forEach(text => {
+    splitTextByWidth(String(text), maxWidth).forEach(line => {
+      wrapped.push(line);
+    });
+  });
+  return wrapped;
+}
+
+function drawSettlementTextLines(lines, x, y, maxChars, lineGap, maxVisualLines = Infinity) {
   let lineY = y;
+  let drawn = 0;
   (lines || []).forEach(text => {
     splitTipText(String(text), maxChars).forEach(line => {
-      ctx.fillText(line, x, lineY);
+      if (drawn >= maxVisualLines) return;
+      const shouldEllipsis = drawn === maxVisualLines - 1 && line.length >= maxChars - 1;
+      ctx.fillText(shouldEllipsis ? `${line.slice(0, Math.max(1, maxChars - 2))}…` : line, x, lineY);
       lineY += lineGap;
+      drawn += 1;
     });
   });
 }
 
+function drawWrappedTextBlock(lines, x, y, maxWidth, lineGap, maxVisualLines = Infinity) {
+  let lineY = y;
+  let drawn = 0;
+  (lines || []).forEach(text => {
+    splitTextByWidth(String(text), maxWidth).forEach(line => {
+      if (drawn >= maxVisualLines) return;
+      const shouldEllipsis = drawn === maxVisualLines - 1;
+      const finalLine = shouldEllipsis && ctx.measureText(line).width > maxWidth - 8
+        ? fitTextByWidth(line, maxWidth - 4)
+        : line;
+      ctx.fillText(finalLine, x, lineY);
+      lineY += lineGap;
+      drawn += 1;
+    });
+  });
+}
+
+function formatMoveCoord(move) {
+  if (!move) return '--,--';
+  return `${move.row + 1},${move.col + 1}`;
+}
+
+function getSideName(side) {
+  return side === playerSide ? getLocalPlayerName() : getCurrentOpponent().name;
+}
+
+function getLineDirectionName(winLine) {
+  if (!Array.isArray(winLine) || winLine.length < 2) return '关键线';
+  const first = winLine[0];
+  const last = winLine[winLine.length - 1];
+  if (first.row === last.row) return '横线';
+  if (first.col === last.col) return '竖线';
+  return (last.row - first.row) * (last.col - first.col) > 0 ? '左上右下斜线' : '右上左下斜线';
+}
+
+function countMovesBySide(side) {
+  return (game.moveHistory || []).filter(move => move.player === side).length;
+}
+
+function countCenterMoves(side) {
+  const center = Math.floor(BOARD_SIZE / 2);
+  return (game.moveHistory || []).filter(move =>
+    move.player === side &&
+    Math.abs(move.row - center) <= 2 &&
+    Math.abs(move.col - center) <= 2
+  ).length;
+}
+
+function getSkillUseReview(skillId, effect) {
+  const skill = SKILLS[skillId] || SKILL_INFO[skillId] || { name: '技能' };
+  const positions = effect && Array.isArray(effect.positions) ? effect.positions : [];
+  if (skillId === 1) {
+    return {
+      name: skill.name,
+      quality: positions.length >= 2 ? '不错' : '偏弱',
+      text: positions.length >= 2
+        ? '悔棋把双方最近的关键一步都撤掉了，适合用来救急。'
+        : '悔棋效果不明显，下次等对手快连成线时再用更值。'
+    };
+  }
+  if (skillId === 2) {
+    return {
+      name: skill.name,
+      quality: positions.length >= 2 ? '很赚' : '偏亏',
+      text: positions.length >= 2
+        ? `炸掉${positions.length}颗棋子，这次技能用得很赚。`
+        : `只炸掉${positions.length}颗棋子，有点浪费内力。`
+    };
+  }
+  if (skillId === 3) {
+    return {
+      name: skill.name,
+      quality: '看位置',
+      text: effect && effect.from && effect.to
+        ? `把对方棋子从${formatMoveCoord(effect.from)}挪到${formatMoveCoord(effect.to)}，主要看有没有断掉对方连线。`
+        : '移动棋子适合专门拆对手快连成5个的位置。'
+    };
+  }
+  if (skillId === 4) {
+    return {
+      name: skill.name,
+      quality: '防守强',
+      text: '跳过对手一回合很适合救命，最好在对手快连成4个或5个前用。'
+    };
+  }
+  if (skillId === 5) {
+    return {
+      name: skill.name,
+      quality: positions.length >= 12 ? '大招' : '偏早',
+      text: positions.length >= 12
+        ? '重开棋盘改变了整局走势，适合在明显落后时翻盘。'
+        : '棋盘还不算乱就重开，可能放得有点早。'
+    };
+  }
+  return {
+    name: skill.name,
+    quality: '已生效',
+    text: '技能已经生效，下次重点看它有没有挡住对手连线。'
+  };
+}
+
+function recordSkillUse(player, skillId, effect) {
+  if (!currentMatchStats.skillLog) currentMatchStats.skillLog = [];
+  const review = getSkillUseReview(skillId, effect);
+  currentMatchStats.skillLog.push({
+    player,
+    skillId,
+    name: review.name,
+    quality: review.quality,
+    text: review.text
+  });
+}
+
+function buildTechnicalReview(winner, isForbidden, durationSec, winLine) {
+  const isOnline = onlineMatch.enabled;
+  const moves = game.moveHistory || [];
+  const totalMoves = moves.length;
+  const lastMove = moves[moves.length - 1] || null;
+  const playerMoves = countMovesBySide(playerSide);
+  const opponentMoves = countMovesBySide(aiSide);
+  const playerCenter = countCenterMoves(playerSide);
+  const opponentCenter = countCenterMoves(aiSide);
+  const playerMp = game.mp[playerSide] || 0;
+  const opponentMp = game.mp[aiSide] || 0;
+  const pace = durationSec <= 60 ? '快棋' : (durationSec <= 180 ? '中速局' : '长盘');
+  const playerSkillLogs = (currentMatchStats.skillLog || []).filter(log => log.player === playerSide);
+  const lines = [];
+
+  if (isForbidden) {
+    lines.push(`最后黑方下在${formatMoveCoord(lastMove)}，犯了禁手，所以白方赢。`);
+  } else if (Array.isArray(winLine) && winLine.length >= 5) {
+    lines.push(`${getSideName(winner)}最后下在${formatMoveCoord(lastMove)}，这条线连成5个，所以赢了。`);
+  } else {
+    lines.push(`这局一共下了${totalMoves}手，最后${getSideName(winner)}赢了。`);
+  }
+
+  if (playerSkillLogs.length > 0) {
+    const keySkill = playerSkillLogs[playerSkillLogs.length - 1];
+    lines.push(`你用了${playerSkillLogs.length}次技能，最关键是「${keySkill.name}」：${keySkill.text}`);
+  } else {
+    lines.push('你这局没用技能，重点复盘落子：别让对手安静地连成一条线。');
+  }
+
+  const centerLine = playerCenter === opponentCenter
+    ? `棋盘中间双方下得差不多，各下了${playerCenter}手。`
+    : (playerCenter > opponentCenter
+      ? '你在棋盘中间下得更多，更容易连出威胁。'
+      : '对手在棋盘中间下得更多，你被挤到边上了。');
+  const mpLine = playerMp > opponentMp + 40
+    ? `你还剩很多内力，下次别舍不得放技能。`
+    : (opponentMp > playerMp + 40
+      ? `对手还剩不少内力，但已经靠下棋占到便宜。`
+      : `双方内力差不多，别漏看对方快连成5个的位置。`);
+  lines.push(`${centerLine}${pace}里你下了${playerMoves}手，对手${opponentMoves}手。${mpLine}`);
+
+  return {
+    title: isOnline ? '好友复盘' : 'AI复盘',
+    tag: winner === playerSide ? '赢得明白' : '下局建议',
+    lines
+  };
+}
+
 function drawSettlement() {
   const layout = getSettlementLayout();
-  const { panelX, panelY, panelW, panelH, homeBtnX, replayBtnX, btnY, btnW, btnH } = layout;
+  const {
+    panelX, panelY, panelW,
+    titleY, subtitleY, reportY, reportH, boxY, boxH, reviewY, reviewH, statBoxY, statBoxH, statY,
+    homeBtnX, replayBtnX, btnY, btnW, btnH
+  } = layout;
   const data = gameState.settlementData;
   if (!data) return;
 
@@ -1842,90 +2474,188 @@ function drawSettlement() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = data.resultColor;
-  ctx.font = 'bold 34px KaiTi, STKaiti, SimHei, serif';
+  ctx.font = 'bold 40px KaiTi, STKaiti, SimHei, serif';
   ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
   ctx.shadowBlur = 8;
-  ctx.fillText(data.resultTitle, panelX + panelW / 2, panelY + 44);
+  ctx.fillText(data.resultTitle, panelX + panelW / 2, titleY);
   ctx.shadowBlur = 0;
 
   ctx.fillStyle = 'rgba(231, 225, 214, 0.95)';
-  ctx.font = '12px SimHei, Arial';
-  ctx.fillText(`用时 ${formatDuration(data.durationSec)} · 总手数 ${data.totalMoves}`, panelX + panelW / 2, panelY + 73);
+  ctx.font = '15px SimHei, Arial';
+  ctx.fillText(`用时 ${formatDuration(data.durationSec)} · 总手数 ${data.totalMoves}`, panelX + panelW / 2, subtitleY);
 
-  const metricY = panelY + 94;
-  const metricGap = 7;
-  const metricW = (panelW - 28 - metricGap * 2) / 3;
-  const metricX = panelX + 14;
-  drawSettlementMetric(metricX, metricY, metricW, '玩家技能', data.player.skills, COLORS.skill2);
-  drawSettlementMetric(metricX + metricW + metricGap, metricY, metricW, 'AI技能', data.ai.skills, COLORS.skill1);
-  drawSettlementMetric(metricX + (metricW + metricGap) * 2, metricY, metricW, '胜率', `${data.session.winRate}%`, COLORS.gold);
+  const reportX = panelX + 10;
+  const reportW = panelW - 20;
+  const reportGrad = ctx.createLinearGradient(reportX, reportY, reportX, reportY + reportH);
+  reportGrad.addColorStop(0, 'rgba(16, 27, 34, 0.96)');
+  reportGrad.addColorStop(1, 'rgba(10, 18, 24, 0.96)');
+  drawRoundedCard(reportX, reportY, reportW, reportH, {
+    radius: 18,
+    fillStyle: reportGrad,
+    strokeStyle: 'rgba(215, 174, 120, 0.5)',
+    lineWidth: 1.3,
+    shadowBlur: 12
+  });
 
-  const boxY = metricY + 48;
-  const boxH = 82;
-  const halfGap = 8;
-  const boxW = (panelW - 28 - halfGap) / 2;
-  const playerX = panelX + 14;
+  ctx.save();
+  roundedRectPath(reportX + 1, reportY + 1, reportW - 2, 46, 17);
+  const reportHeaderGrad = ctx.createLinearGradient(reportX, reportY, reportX + reportW, reportY);
+  reportHeaderGrad.addColorStop(0, 'rgba(215, 174, 120, 0.14)');
+  reportHeaderGrad.addColorStop(1, 'rgba(215, 174, 120, 0.04)');
+  ctx.fillStyle = reportHeaderGrad;
+  ctx.fill();
+  ctx.restore();
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = COLORS.gold;
+  ctx.font = 'bold 16px SimHei, Arial';
+  ctx.fillText('本局战报', reportX + 18, reportY + 23);
+  ctx.beginPath();
+  ctx.moveTo(reportX + 16, reportY + 40);
+  ctx.lineTo(reportX + reportW - 16, reportY + 40);
+  ctx.strokeStyle = 'rgba(215, 174, 120, 0.18)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  const halfGap = 10;
+  const boxW = (reportW - 24 - halfGap) / 2;
+  const playerX = reportX + 12;
   const aiX = playerX + boxW + halfGap;
   drawRoundedCard(playerX, boxY, boxW, boxH, {
-    radius: 12,
-    fillStyle: 'rgba(111, 139, 116, 0.2)',
-    strokeStyle: 'rgba(188, 219, 200, 0.5)',
-    lineWidth: 1.2
+    radius: 14,
+    fillStyle: 'rgba(111, 139, 116, 0.16)',
+    strokeStyle: 'rgba(188, 219, 200, 0.54)',
+    lineWidth: 1.2,
+    shadowBlur: 4
   });
   drawRoundedCard(aiX, boxY, boxW, boxH, {
-    radius: 12,
-    fillStyle: 'rgba(157, 106, 96, 0.2)',
-    strokeStyle: 'rgba(226, 191, 184, 0.5)',
-    lineWidth: 1.2
+    radius: 14,
+    fillStyle: 'rgba(157, 106, 96, 0.16)',
+    strokeStyle: 'rgba(226, 191, 184, 0.54)',
+    lineWidth: 1.2,
+    shadowBlur: 4
   });
+
+  const avatarY = boxY + 26;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 24px Arial';
+  ctx.fillStyle = '#f5efe2';
+  ctx.fillText('🧑', playerX + 12, avatarY);
+  ctx.fillText(getCurrentOpponent().avatar, aiX + 12, avatarY);
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  ctx.font = 'bold 12px SimHei, Arial';
+  ctx.font = 'bold 15px SimHei, Arial';
   ctx.fillStyle = COLORS.gold;
-  ctx.fillText(`玩家（${getSideText(playerSide)}）`, playerX + 10, boxY + 18);
-  ctx.fillText(`${getCurrentOpponent().name}（${getSideText(aiSide)}）`, aiX + 10, boxY + 18);
+  const playerNameText = fitTextByWidth(`${getLocalPlayerName()}（${getSideText(playerSide)}）`, boxW - 56);
+  const opponentNameText = fitTextByWidth(`${getCurrentOpponent().name}（${getSideText(aiSide)}）`, boxW - 56);
+  ctx.fillText(playerNameText, playerX + 44, boxY + 22);
+  ctx.fillText(opponentNameText, aiX + 44, boxY + 22);
 
-  ctx.font = '12px Arial';
+  ctx.font = 'bold 14px Arial';
   ctx.fillStyle = COLORS.text;
-  ctx.fillText(`落子 ${data.player.moves}`, playerX + 10, boxY + 42);
-  ctx.fillText(`内力 ${data.player.mp}/200`, playerX + 10, boxY + 64);
+  ctx.fillText(`落子 ${data.player.moves}`, playerX + 12, boxY + 56);
+  ctx.fillText(`技能 ${data.player.skills}`, playerX + 12, boxY + 82);
+  ctx.fillText(`内力 ${data.player.mp}/200`, playerX + 12, boxY + 108);
 
-  ctx.fillText(`落子 ${data.ai.moves}`, aiX + 10, boxY + 42);
-  ctx.fillText(`内力 ${data.ai.mp}/200`, aiX + 10, boxY + 64);
+  ctx.fillText(`落子 ${data.ai.moves}`, aiX + 12, boxY + 56);
+  ctx.fillText(`技能 ${data.ai.skills}`, aiX + 12, boxY + 82);
+  ctx.fillText(`内力 ${data.ai.mp}/200`, aiX + 12, boxY + 108);
 
-  const reviewY = boxY + boxH + 12;
-  const reviewH = 132;
-  drawRoundedCard(panelX + 14, reviewY, panelW - 28, reviewH, {
-    radius: 12,
-    fillStyle: 'rgba(13, 23, 29, 0.78)',
-    strokeStyle: 'rgba(215, 174, 120, 0.48)',
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(231, 225, 214, 0.28)';
+  ctx.font = 'bold 16px Arial';
+  ctx.fillText('VS', reportX + reportW / 2, boxY - 10);
+
+  const reviewX = reportX + 12;
+  const reviewW = reportW - 24;
+  drawRoundedCard(reviewX, reviewY, reviewW, reviewH, {
+    radius: 14,
+    fillStyle: 'rgba(13, 23, 29, 0.88)',
+    strokeStyle: 'rgba(215, 174, 120, 0.36)',
     lineWidth: 1.1,
     shadowBlur: 6
   });
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(reviewX + 18, reviewY + 40);
+  ctx.lineTo(reviewX + reviewW - 18, reviewY + 40);
+  ctx.strokeStyle = 'rgba(215, 174, 120, 0.16)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = COLORS.gold;
-  ctx.font = 'bold 14px SimHei, Arial';
-  ctx.fillText(`${getCurrentOpponent().avatar} ${data.review.title}`, panelX + 26, reviewY + 24);
+  ctx.font = 'bold 18px SimHei, Arial';
+  ctx.fillText(`${getCurrentOpponent().avatar} ${data.review.title}`, reviewX + 18, reviewY + 26);
   ctx.textAlign = 'right';
   ctx.fillStyle = data.isPlayerWin ? COLORS.skill2 : COLORS.skill1;
-  ctx.font = 'bold 11px SimHei, Arial';
-  ctx.fillText(data.review.tag, panelX + panelW - 26, reviewY + 24);
+  ctx.font = 'bold 13px SimHei, Arial';
+  ctx.fillText(data.review.tag, reviewX + reviewW - 18, reviewY + 26);
   ctx.textAlign = 'left';
   ctx.fillStyle = COLORS.text;
-  ctx.font = '12px SimHei, Arial';
-  drawSettlementTextLines(data.review.lines, panelX + 26, reviewY + 49, 24, 18);
+  ctx.font = '13px SimHei, Arial';
+  const reviewTextX = reviewX + 18;
+  const reviewTextY = reviewY + 58;
+  const reviewTextW = reviewW - 36;
+  const reviewTextH = Math.max(42, reviewH - 70);
+  const reviewLineGap = 20;
+  const reviewLines = getWrappedTextLines(data.review.lines, reviewTextW);
+  const reviewContentH = reviewLines.length * reviewLineGap;
+  const maxReviewScroll = Math.max(0, reviewContentH - reviewTextH);
+  if (gameState.settlementReviewScroll > maxReviewScroll) {
+    gameState.settlementReviewScroll = maxReviewScroll;
+  }
+  settlementReviewBox = {
+    x: reviewTextX - 6,
+    y: reviewTextY - 16,
+    w: reviewTextW + 12,
+    h: reviewTextH + 18,
+    maxScroll: maxReviewScroll
+  };
 
-  const statY = reviewY + reviewH + 10;
+  ctx.save();
+  roundedRectPath(settlementReviewBox.x, settlementReviewBox.y, settlementReviewBox.w, settlementReviewBox.h, 8);
+  ctx.clip();
+  let textY = reviewTextY - gameState.settlementReviewScroll;
+  reviewLines.forEach(line => {
+    ctx.fillText(line, reviewTextX, textY);
+    textY += reviewLineGap;
+  });
+  ctx.restore();
+
+  if (maxReviewScroll > 0) {
+    const trackX = settlementReviewBox.x + settlementReviewBox.w - 4;
+    const trackY = settlementReviewBox.y + 6;
+    const trackH = settlementReviewBox.h - 12;
+    const thumbH = Math.max(16, trackH * (reviewTextH / reviewContentH));
+    const thumbY = trackY + (trackH - thumbH) * (gameState.settlementReviewScroll / maxReviewScroll);
+    ctx.save();
+    ctx.fillStyle = 'rgba(215, 174, 120, 0.16)';
+    ctx.fillRect(trackX, trackY, 2, trackH);
+    ctx.fillStyle = 'rgba(215, 174, 120, 0.55)';
+    ctx.fillRect(trackX - 1, thumbY, 4, thumbH);
+    ctx.restore();
+  }
+
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = 'rgba(231, 225, 214, 0.82)';
-  ctx.font = '11px SimHei, Arial';
+  ctx.font = '13px SimHei, Arial';
+  drawRoundedCard(reportX + 12, statBoxY, reportW - 24, statBoxH, {
+    radius: 10,
+    fillStyle: 'rgba(255, 255, 255, 0.03)',
+    strokeStyle: 'rgba(130, 153, 172, 0.16)',
+    lineWidth: 1
+  });
   ctx.fillText(
-    `总局 ${data.session.rounds} · 胜/负 ${data.session.playerWins}/${data.session.aiWins} · 禁手负 ${data.session.forbiddenLosses}`,
-    panelX + panelW / 2,
-    statY + 8
+    `总局 ${data.session.rounds} · 胜/负 ${data.session.playerWins}/${data.session.aiWins} · 胜率 ${data.session.winRate}% · 禁手负 ${data.session.forbiddenLosses}`,
+    reportX + reportW / 2,
+    statY
   );
 
   // 回到主页按钮
@@ -1939,7 +2669,7 @@ function drawSettlement() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#eef4f8';
-  ctx.font = 'bold 15px SimHei, Arial';
+  ctx.font = 'bold 17px SimHei, Arial';
   ctx.fillText('回到主页', homeBtnX + btnW / 2, btnY + btnH / 2);
 
   // 再来一局按钮
@@ -1953,8 +2683,8 @@ function drawSettlement() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#f5efe2';
-  ctx.font = 'bold 15px SimHei, Arial';
-  ctx.fillText('再来一局', replayBtnX + btnW / 2, btnY + btnH / 2);
+  ctx.font = 'bold 17px SimHei, Arial';
+  ctx.fillText(data.isOnline ? '同房再战' : '再来一局', replayBtnX + btnW / 2, btnY + btnH / 2);
 }
 
 // 绘制AI信息栏
@@ -2013,13 +2743,23 @@ function drawAIInfo() {
   ctx.fillStyle = COLORS.gold;
   ctx.font = 'bold 13px SimHei, Arial';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`${getCurrentOpponent().name}（AI）·${getSideText(aiSide)}`, nameX, lineY);
+  const opponentRoleText = onlineMatch.enabled
+    ? (onlineMatch.hasOpponent ? '好友' : '待加入')
+    : 'AI';
+  const aiLabel = `${getCurrentOpponent().name}（${opponentRoleText}）·${getSideText(aiSide)}`;
+  const aiMpText = `内力 ${gameState.aiMp}/200`;
+  const mpRightX = x + w - padding;
+  const buttonGap = 8;
+  const mpTextW = 62;
+  const maxLabelW = Math.max(86, mpRightX - nameX - mpTextW - buttonGap);
+  const fittedAiLabel = fitTextByWidth(aiLabel, maxLabelW);
+  ctx.fillText(fittedAiLabel, nameX, lineY);
 
   ctx.fillStyle = COLORS.gold;
   ctx.font = 'bold 10px Arial';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`内力 ${gameState.aiMp}/200`, x + w - padding, lineY);
+  ctx.fillText(aiMpText, mpRightX, lineY);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -2094,6 +2834,7 @@ function drawBoardArea() {
       }
     }
   }
+  drawLastOpponentMoveHint(boardX, boardY);
 
   // 保存棋盘位置用于点击检测
   boardRect = {
@@ -2117,22 +2858,23 @@ function drawPlayerInfo() {
   const height = PLAYER_INFO_HEIGHT;
 
   // 提示文字
-  ctx.fillStyle = COLORS.text;
-  ctx.font = '12px Arial';
   ctx.textAlign = 'center';
   const lastPlayerMove = getLastMoveOf(playerSide);
   const lastAiMove = getLastMoveOf(aiSide);
-  const moveLogText = `下棋记录 你(${lastPlayerMove ? `${lastPlayerMove.row + 1},${lastPlayerMove.col + 1}` : '--,--'}) · ${getCurrentOpponent().name}(${lastAiMove ? `${lastAiMove.row + 1},${lastAiMove.col + 1}` : '--,--'})`;
+  const moveLogText = onlineMatch.enabled
+    ? `联机状态：${getOnlineStatusText()}`
+    : `下棋记录 你(${lastPlayerMove ? `${lastPlayerMove.row + 1},${lastPlayerMove.col + 1}` : '--,--'}) · ${getCurrentOpponent().name}(${lastAiMove ? `${lastAiMove.row + 1},${lastAiMove.col + 1}` : '--,--'})`;
   ctx.fillStyle = COLORS.gold;
-  ctx.font = '12px SimHei, Arial';
+  ctx.font = onlineMatch.enabled ? 'bold 12px SimHei, Arial' : '12px SimHei, Arial';
   ctx.fillText(moveLogText, SCREEN_WIDTH / 2, boardY + 22);
 
   // 玩家面板
   const panelY = boardY + 45;
   const panelHeight = height - 45;
+  const panelW = SCREEN_WIDTH - 2 * BOARD_MARGIN;
   const mpPercent = Math.max(0, Math.min(1, gameState.playerMp / 200)); // 上限200
 
-  drawRoundedCard(BOARD_MARGIN, panelY, SCREEN_WIDTH - 2 * BOARD_MARGIN, panelHeight, {
+  drawRoundedCard(BOARD_MARGIN, panelY, panelW, panelHeight, {
     radius: 14,
     fillStyle: 'rgba(18, 30, 38, 0.86)',
     strokeStyle: 'rgba(215, 174, 120, 0.58)',
@@ -2143,9 +2885,8 @@ function drawPlayerInfo() {
   // 面板本体作为内力条：按 MP 比例填充
   if (mpPercent > 0) {
     ctx.save();
-    roundedRectPath(BOARD_MARGIN, panelY, SCREEN_WIDTH - 2 * BOARD_MARGIN, panelHeight, 14);
+    roundedRectPath(BOARD_MARGIN, panelY, panelW, panelHeight, 14);
     ctx.clip();
-    const panelW = SCREEN_WIDTH - 2 * BOARD_MARGIN;
     const fillW = Math.max(1, Math.floor(panelW * mpPercent));
     const fillGrad = ctx.createLinearGradient(BOARD_MARGIN, panelY, BOARD_MARGIN + fillW, panelY);
     fillGrad.addColorStop(0, 'rgba(111, 139, 116, 0.42)');
@@ -2157,7 +2898,7 @@ function drawPlayerInfo() {
 
   // 重新描边，避免填充覆盖边线
   ctx.save();
-  roundedRectPath(BOARD_MARGIN, panelY, SCREEN_WIDTH - 2 * BOARD_MARGIN, panelHeight, 14);
+  roundedRectPath(BOARD_MARGIN, panelY, panelW, panelHeight, 14);
   ctx.strokeStyle = 'rgba(215, 174, 120, 0.58)';
   ctx.lineWidth = 1.4;
   ctx.stroke();
@@ -2183,13 +2924,24 @@ function drawPlayerInfo() {
   ctx.font = 'bold 13px SimHei, Arial';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`玩家（你）·${getSideText(playerSide)}`, nameX, lineY);
+  const playerLabel = `玩家（${getLocalPlayerName()}）·${getSideText(playerSide)}`;
+  const mpText = `内力 ${gameState.playerMp}/200`;
+  const mpRightX = BOARD_MARGIN + panelW - compactPadding;
+  const buttonGap = 8;
+  const exitButtonW = 58;
+  const mpTextW = 62;
+  const maxLabelW = Math.max(86, mpRightX - nameX - mpTextW - exitButtonW - buttonGap * 3);
+  const fittedPlayerLabel = fitTextByWidth(playerLabel, maxLabelW);
+  ctx.fillText(fittedPlayerLabel, nameX, lineY);
+  const labelW = ctx.measureText(fittedPlayerLabel).width;
+  const exitX = Math.min(nameX + labelW + buttonGap, mpRightX - mpTextW - exitButtonW - buttonGap);
+  drawMatchExitButton(exitX, lineY);
 
   ctx.fillStyle = COLORS.gold;
   ctx.font = 'bold 10px Arial';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`内力 ${gameState.playerMp}/200`, BOARD_MARGIN + (SCREEN_WIDTH - 2 * BOARD_MARGIN) - compactPadding, lineY);
+  ctx.fillText(mpText, mpRightX, lineY);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -2323,18 +3075,25 @@ function drawButton(text, x, y, w, h, color) {
 
 function drawTopToolButton(button, active = true) {
   const isActiveMusic = button.kind === 'music' && active;
-  const stroke = isActiveMusic
+  const isExit = button.kind === 'exit';
+  const stroke = isExit
+    ? 'rgba(221, 126, 104, 0.82)'
+    : isActiveMusic
     ? 'rgba(73, 205, 122, 0.8)'
     : 'rgba(128, 142, 158, 0.78)';
-  const fill = isActiveMusic
+  const fill = isExit
+    ? 'rgba(86, 39, 34, 0.58)'
+    : isActiveMusic
     ? 'rgba(18, 76, 52, 0.5)'
     : 'rgba(35, 42, 55, 0.58)';
-  const textColor = isActiveMusic
+  const textColor = isExit
+    ? '#ffb8a5'
+    : isActiveMusic
     ? '#57e287'
     : 'rgba(229, 235, 244, 0.88)';
 
   drawRoundedCard(button.x, button.y, button.w, button.h, {
-    radius: 6,
+    radius: 5,
     fillStyle: fill,
     strokeStyle: stroke,
     lineWidth: 1.1,
@@ -2345,10 +3104,36 @@ function drawTopToolButton(button, active = true) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = textColor;
-  ctx.font = 'bold 16px Arial';
-  ctx.fillText(button.icon, button.x + button.w / 2, button.y + 13);
+  ctx.font = 'bold 13px Arial';
+  ctx.fillText(button.icon, button.x + button.w / 2, button.y + 10);
+  ctx.font = 'bold 8px SimHei, Arial';
+  ctx.fillText(button.label, button.x + button.w / 2, button.y + 25);
+}
+
+function drawMatchExitButton(x, y) {
+  const w = 58;
+  const h = 22;
+  matchExitButton = { x, y: y - h / 2, w, h };
+  drawRoundedCard(matchExitButton.x, matchExitButton.y, w, h, {
+    radius: 11,
+    fillStyle: 'rgba(86, 39, 34, 0.54)',
+    strokeStyle: 'rgba(221, 126, 104, 0.72)',
+    lineWidth: 1,
+    shadowBlur: 3,
+    shadowOffsetY: 1
+  });
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffccb9';
   ctx.font = 'bold 10px SimHei, Arial';
-  ctx.fillText(button.label, button.x + button.w / 2, button.y + 30);
+  ctx.fillText('退出棋局', x + w / 2, y);
+}
+
+function hitMatchExitButton(x, y) {
+  return !!matchExitButton &&
+    x >= matchExitButton.x && x <= matchExitButton.x + matchExitButton.w &&
+    y >= matchExitButton.y && y <= matchExitButton.y + matchExitButton.h;
 }
 
 // 绘制消息
@@ -2423,6 +3208,555 @@ function showGameMessage(text, color, player) {
   showTip(gameState.message, tipPlayer);
 }
 
+function getOnlinePlayerId() {
+  if (onlineMatch.localPlayerId) return onlineMatch.localPlayerId;
+  let id = '';
+  try {
+    id = wx.getStorageSync('onlinePlayerId') || '';
+  } catch (e) {
+    id = '';
+  }
+  if (!id) {
+    id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      wx.setStorageSync('onlinePlayerId', id);
+    } catch (e) {
+      console.log('[WARN] 保存联机玩家ID失败:', e);
+    }
+  }
+  onlineMatch.localPlayerId = id;
+  return id;
+}
+
+function initOnlineBackend() {
+  if (onlineDb) return true;
+  if (!wx.cloud || typeof wx.cloud.init !== 'function') {
+    showSystemMessage('当前未启用云开发，暂不能联机', COLORS.skill1, 2200);
+    return false;
+  }
+  if (typeof wx.cloud.callFunction !== 'function') {
+    showSystemMessage('当前基础库不支持云函数联机', COLORS.skill1, 2200);
+    return false;
+  }
+
+  try {
+    wx.cloud.init({ env: CLOUD_ENV_ID, traceUser: true });
+    onlineDb = wx.cloud.database ? wx.cloud.database({ env: CLOUD_ENV_ID }) : {};
+    return true;
+  } catch (e) {
+    console.log('[ERROR] 初始化联机云开发失败:', e);
+    showSystemMessage('联机服务初始化失败', COLORS.skill1, 2200);
+    return false;
+  }
+}
+
+function callOnlineFunction(action, data = {}) {
+  return wx.cloud.callFunction({
+    name: 'onlineMatch',
+    config: { env: CLOUD_ENV_ID },
+    data: {
+      action,
+      ...data
+    }
+  }).then(res => {
+    const result = res.result || {};
+    if (!result.ok) {
+      throw new Error(result.message || '联机云函数执行失败');
+    }
+    return result;
+  });
+}
+
+function stopOnlinePolling() {
+  if (onlineMatch.pollTimer) {
+    clearInterval(onlineMatch.pollTimer);
+    onlineMatch.pollTimer = null;
+  }
+}
+
+function resetOnlineMatchState() {
+  stopOnlinePolling();
+  onlineMatch.enabled = false;
+  onlineMatch.roomId = '';
+  onlineMatch.role = '';
+  onlineMatch.status = 'offline';
+  onlineMatch.lastVersion = 0;
+  onlineMatch.lastActionKey = '';
+  onlineMatch.settlementHandled = false;
+  onlineMatch.hasOpponent = false;
+  onlineMatch.statusHint = '';
+  onlineMatch.hostName = '';
+  onlineMatch.guestName = '';
+}
+
+function exitCurrentMatch() {
+  clearSkillAnimation();
+  clearTauntTip();
+  clearWinningHighlight();
+  clearSystemMessage();
+  stopOnlinePolling();
+  initGame(true);
+}
+
+function confirmExitCurrentMatch() {
+  audioManager.playSound('click');
+  const content = onlineMatch.enabled
+    ? '退出后将离开当前好友房间，确认退出？'
+    : '确认退出当前棋局并回到主页？';
+  if (!wx.showModal) {
+    exitCurrentMatch();
+    return;
+  }
+  wx.showModal({
+    title: '退出棋局',
+    content,
+    confirmText: '退出',
+    cancelText: '继续下',
+    confirmColor: '#c86f5b',
+    success: res => {
+      if (res.confirm) {
+        exitCurrentMatch();
+      }
+    }
+  });
+}
+
+function isOnlineWaitingForFriend() {
+  return onlineMatch.enabled && onlineMatch.role === 'host' && onlineMatch.status === 'waiting';
+}
+
+function setOnlineStatusHint(text) {
+  if (!onlineMatch.enabled) return;
+  onlineMatch.statusHint = text || '';
+  drawGame();
+}
+
+function getOnlineStatusText() {
+  if (!onlineMatch.enabled) return '';
+  if (onlineMatch.statusHint) return onlineMatch.statusHint;
+  return getOnlineTurnStatusText();
+}
+
+function getOnlineTurnStatusText() {
+  if (onlineMatch.status === 'waiting') return '等待好友加入房间';
+  if (gameState.gameOver || game.gameOver) return '本局已结束';
+  if (game.turn === playerSide) return '轮到你落子';
+  return '等待好友落子';
+}
+
+function setOnlineTurnStatusHint(prefix) {
+  const statusText = getOnlineTurnStatusText();
+  setOnlineStatusHint(prefix ? `${prefix}，${statusText}` : statusText);
+}
+
+function getLatestOnlineAction(actions) {
+  if (!Array.isArray(actions) || actions.length === 0) return null;
+  return actions[actions.length - 1] || null;
+}
+
+function getOnlineActionKey(action) {
+  if (!action) return '';
+  return [
+    action.at || 0,
+    action.by || '',
+    action.type || '',
+    action.row !== undefined ? action.row : '',
+    action.col !== undefined ? action.col : '',
+    action.skillId || ''
+  ].join('|');
+}
+
+function applyOnlineRoomMeta(data) {
+  if (!data) return;
+  onlineMatch.status = data.status || onlineMatch.status;
+  onlineMatch.hasOpponent = !!data.guestId;
+  onlineMatch.hostName = sanitizeDisplayName(data.hostName, onlineMatch.hostName || '玩家');
+  onlineMatch.guestName = sanitizeDisplayName(data.guestName, onlineMatch.guestName || '好友');
+}
+
+function getSkillActionDetail(action) {
+  const effect = action && action.effect ? action.effect : null;
+  if (effect && effect.positions) return `震碎${effect.positions.length}枚棋子`;
+  if (effect && effect.type === 'move') return '移形换位';
+  if (action && action.skillId === 1) return '悔棋生效';
+  if (action && action.skillId === 4) return '冻结回合';
+  if (action && action.skillId === 5) return '重置棋局';
+  return '技能生效';
+}
+
+function handleOnlineRemoteAction(actions) {
+  const action = getLatestOnlineAction(actions);
+  const key = getOnlineActionKey(action);
+  if (!action || !key || key === onlineMatch.lastActionKey) return;
+  onlineMatch.lastActionKey = key;
+  if (action.by === getOnlinePlayerId()) return;
+
+  if (action.type === 'move') {
+    currentMatchStats.aiMoves += 1;
+    showTauntTip(action.player || aiSide);
+    return;
+  }
+
+  if (action.type === 'skill') {
+    const skillId = action.skillId || (action.effect && action.effect.skillId);
+    const skill = SKILLS[skillId] || SKILL_INFO[skillId] || { name: '绝学' };
+    currentMatchStats.aiSkills += 1;
+    recordSkillUse(action.player || aiSide, skillId, action.effect || null);
+    if (action.effect) {
+      startSkillAnimation(action.effect);
+    }
+    showSkillTip(skill.name, action.player || aiSide, skillId, getSkillActionDetail(action));
+  }
+}
+
+function prepareOnlineGame(side, roomId, role, status) {
+  clearSkillAnimation();
+  clearTauntTip();
+  clearWinningHighlight();
+  clearSystemMessage();
+
+  setPlayerSide(side);
+  game = new SkillGomoku();
+  game.turn = BLACK;
+  game.mp[BLACK] = 0;
+  game.mp[WHITE] = 0;
+  boardRect = null;
+  skillButtons = [];
+  aiThinking = false;
+
+  onlineMatch.enabled = true;
+  onlineMatch.roomId = roomId;
+  onlineMatch.role = role;
+  onlineMatch.status = status || 'waiting';
+  onlineMatch.settlementHandled = false;
+  onlineMatch.hasOpponent = status === 'playing';
+  onlineMatch.statusHint = status === 'waiting'
+    ? '等待好友加入房间'
+    : (side === BLACK ? '好友已在房间，轮到你先手' : '好友已在房间，等待黑方先手');
+
+  gameState = {
+    turn: BLACK,
+    playerMp: 0,
+    aiMp: 0,
+    currentSkill: null,
+    skillDesc: '静待时机...',
+    message: '',
+    messageColor: '#ffd700',
+    showMessage: false,
+    gameOver: false,
+    showWelcome: false,
+    showSidePicker: false,
+    showSettlement: false,
+    settlementData: null,
+    settlementReviewScroll: 0,
+    showGuide: false,
+    guideScroll: 0
+  };
+
+  currentMatchStats = {
+    startTime: Date.now(),
+    playerMoves: 0,
+    aiMoves: 0,
+    playerSkills: 0,
+    aiSkills: 0,
+    skillLog: []
+  };
+
+  initAudioForGame();
+  updateGameState();
+  drawGame();
+}
+
+function buildOnlineSnapshot() {
+  return {
+    board: game.board.map(row => row.slice()),
+    turn: game.turn,
+    mp: { [BLACK]: game.mp[BLACK], [WHITE]: game.mp[WHITE] },
+    gameOver: game.gameOver,
+    winner: game.winner,
+    moveCount: game.moveCount,
+    moveHistory: (game.moveHistory || []).map(move => ({
+      row: move.row,
+      col: move.col,
+      player: move.player,
+      mpBefore: move.mpBefore ? { ...move.mpBefore } : null
+    })),
+    extraTurns: game.extraTurns,
+    skipNextTurn: game.skipNextTurn,
+    forbidden: false,
+    winLine: null
+  };
+}
+
+function applyOnlineSnapshot(snapshot) {
+  if (!snapshot || !onlineMatch.enabled) return;
+
+  const wasGameOver = gameState.gameOver || game.gameOver;
+  const isReplaySnapshot = wasGameOver && !snapshot.gameOver && (snapshot.moveCount || 0) === 0;
+  game.board = (snapshot.board || []).map(row => row.slice());
+  game.turn = snapshot.turn || BLACK;
+  game.mp = {
+    [BLACK]: snapshot.mp && snapshot.mp[BLACK] !== undefined ? snapshot.mp[BLACK] : 0,
+    [WHITE]: snapshot.mp && snapshot.mp[WHITE] !== undefined ? snapshot.mp[WHITE] : 0
+  };
+  game.gameOver = !!snapshot.gameOver;
+  game.winner = snapshot.winner || null;
+  game.moveCount = snapshot.moveCount || 0;
+  game.moveHistory = Array.isArray(snapshot.moveHistory) ? snapshot.moveHistory : [];
+  game.extraTurns = snapshot.extraTurns || 0;
+  game.skipNextTurn = !!snapshot.skipNextTurn;
+  game.currentSkill = null;
+  game.selectedPiece = null;
+  gameState.currentSkill = null;
+  gameState.skillDesc = '静待时机...';
+  if (isReplaySnapshot) {
+    clearSystemMessage();
+    gameState.showSettlement = false;
+    gameState.settlementData = null;
+    gameState.settlementReviewScroll = 0;
+    gameState.gameOver = false;
+    onlineMatch.settlementHandled = false;
+    currentMatchStats = {
+      startTime: Date.now(),
+      playerMoves: 0,
+      aiMoves: 0,
+      playerSkills: 0,
+      aiSkills: 0,
+      skillLog: []
+    };
+  }
+
+  updateGameState();
+  if (!game.gameOver) {
+    onlineMatch.statusHint = getOnlineTurnStatusText();
+  }
+  drawGame();
+
+  if (game.gameOver && !wasGameOver && !onlineMatch.settlementHandled) {
+    onlineMatch.settlementHandled = true;
+    setTimeout(() => {
+      endGame(game.winner, snapshot.forbidden === true, snapshot.winLine || null);
+    }, 450);
+  }
+}
+
+function createOnlineRoom() {
+  if (!initOnlineBackend()) return;
+  requestLocalNicknameThen(() => {
+    doCreateOnlineRoom();
+  });
+}
+
+function doCreateOnlineRoom() {
+  const playerId = getOnlinePlayerId();
+  showSystemMessage('正在创建联机房间...', COLORS.gold, 1200);
+  showOnlineCreateLoading();
+
+  const initialSnapshot = {
+    board: new SkillGomoku().initBoard(),
+    turn: BLACK,
+    mp: { [BLACK]: 0, [WHITE]: 0 },
+    gameOver: false,
+    winner: null,
+    moveCount: 0,
+    moveHistory: [],
+    extraTurns: 0,
+    skipNextTurn: false,
+    forbidden: false,
+    winLine: null
+  };
+
+  callOnlineFunction('create', {
+    playerId,
+    playerName: getLocalPlayerName(),
+    snapshot: initialSnapshot
+  }).then(res => {
+    const roomId = res.roomId;
+    prepareOnlineGame(BLACK, roomId, 'host', 'waiting');
+    onlineMatch.hostName = getLocalPlayerName();
+    onlineMatch.lastVersion = 1;
+    startOnlinePolling();
+    setOnlineStatusHint('房间已创建，等待好友加入');
+    hideOnlineCreateLoading();
+    setTimeout(() => {
+      shareOnlineRoom(roomId);
+    }, 30);
+  }).catch(err => {
+    hideOnlineCreateLoading();
+    console.log('[ERROR] 创建联机房间失败:', err);
+    showSystemMessage('创建房间失败，请检查云开发', COLORS.skill1, 2400);
+  });
+}
+
+function showOnlineCreateLoading() {
+  if (wx.showLoading) {
+    wx.showLoading({
+      title: '正在开房...',
+      mask: true
+    });
+  }
+}
+
+function hideOnlineCreateLoading() {
+  if (wx.hideLoading) {
+    wx.hideLoading();
+  }
+}
+
+function shareOnlineRoom(roomId) {
+  if (!wx.shareAppMessage) {
+    showSystemMessage('当前环境不支持分享', COLORS.skill1, 1800);
+    return;
+  }
+  wx.shareAppMessage({
+    title: '来一局真技能五子棋',
+    query: `onlineRoom=${encodeURIComponent(roomId)}`,
+    imageUrl: 'images/logo.png'
+  });
+  setOnlineStatusHint('分享已发出，等待好友进入');
+}
+
+function joinOnlineRoom(roomId) {
+  if (!roomId || !initOnlineBackend()) return;
+  requestLocalNicknameThen(() => {
+    doJoinOnlineRoom(roomId);
+  });
+}
+
+function doJoinOnlineRoom(roomId) {
+  const playerId = getOnlinePlayerId();
+  showSystemMessage('正在加入好友对局...', COLORS.gold, 1600);
+
+  callOnlineFunction('join', {
+    roomId,
+    playerId,
+    playerName: getLocalPlayerName()
+  }).then(res => {
+    const data = res.room || {};
+    if (!data.snapshot) {
+      showSystemMessage('房间数据异常', COLORS.skill1, 2200);
+      return;
+    }
+
+    const isHost = data.hostId === playerId;
+    const side = isHost ? BLACK : WHITE;
+    const role = isHost ? 'host' : 'guest';
+    prepareOnlineGame(side, roomId, role, data.status || 'playing');
+    applyOnlineRoomMeta(data);
+    onlineMatch.lastVersion = data.version || 1;
+    onlineMatch.lastActionKey = getOnlineActionKey(getLatestOnlineAction(data.actions));
+    applyOnlineSnapshot(data.snapshot);
+    startOnlinePolling();
+
+    setOnlineStatusHint(side === BLACK ? '你执黑，等待好友加入' : '你执白，等待黑方先手');
+  }).catch(err => {
+    console.log('[ERROR] 加入联机房间失败:', err);
+    showSystemMessage('加入房间失败或房间已失效', COLORS.skill1, 2400);
+  });
+}
+
+function startOnlinePolling() {
+  if (!onlineMatch.enabled || !onlineMatch.roomId || !onlineDb) return;
+  stopOnlinePolling();
+  onlineMatch.pollTimer = setInterval(fetchOnlineRoomState, 1500);
+  fetchOnlineRoomState();
+}
+
+function fetchOnlineRoomState() {
+  if (!onlineMatch.enabled || !onlineMatch.roomId || !onlineDb) return;
+  callOnlineFunction('get', {
+    roomId: onlineMatch.roomId,
+    playerId: getOnlinePlayerId()
+  }).then(res => {
+    const data = res.room || {};
+    const prevStatus = onlineMatch.status;
+    const guestJoined = onlineMatch.role === 'host' && !!data.guestId && prevStatus === 'waiting';
+    applyOnlineRoomMeta(data);
+    if (data.version && data.version > onlineMatch.lastVersion) {
+      onlineMatch.lastVersion = data.version;
+      applyOnlineSnapshot(data.snapshot);
+      handleOnlineRemoteAction(data.actions);
+    }
+    if (guestJoined) {
+      onlineMatch.status = 'playing';
+      setOnlineStatusHint('好友已加入，黑方先手，轮到你落子');
+    }
+  }).catch(err => {
+    console.log('[WARN] 拉取联机状态失败:', err);
+  });
+}
+
+function pushOnlineState(action, result) {
+  if (!onlineMatch.enabled || !onlineMatch.roomId || !onlineDb) return;
+  const snapshot = buildOnlineSnapshot();
+  snapshot.forbidden = !!(result && result.forbidden);
+  snapshot.winLine = result && result.winLine ? result.winLine : null;
+  const nextVersion = onlineMatch.lastVersion + 1;
+  const payload = {
+    version: nextVersion,
+    snapshot,
+    updatedAt: Date.now(),
+    status: snapshot.gameOver ? 'finished' : 'playing',
+    lastAction: action || null
+  };
+
+  callOnlineFunction('update', {
+    roomId: onlineMatch.roomId,
+    playerId: getOnlinePlayerId(),
+    payload
+  }).then(res => {
+    onlineMatch.lastVersion = res.version || nextVersion;
+    if (snapshot.gameOver) {
+      saveOnlineRecord(snapshot, action);
+    }
+  }).catch(err => {
+    console.log('[ERROR] 同步联机状态失败:', err);
+    showSystemMessage('联机同步失败，请检查网络', COLORS.skill1, 2200);
+  });
+}
+
+function saveOnlineRecord(snapshot, action) {
+  if (!onlineDb || !onlineMatch.roomId) return;
+  callOnlineFunction('saveRecord', {
+    roomId: onlineMatch.roomId,
+    playerId: getOnlinePlayerId(),
+    record: {
+      hostSide: BLACK,
+      guestSide: WHITE,
+      winner: snapshot.winner,
+      totalMoves: snapshot.moveCount,
+      durationSec: Math.max(1, Math.round((Date.now() - currentMatchStats.startTime) / 1000)),
+      lastAction: action || null,
+      snapshot
+    }
+  }).catch(err => {
+    console.log('[WARN] 保存联机战绩失败:', err);
+  });
+}
+
+function restartOnlineRoom() {
+  if (!onlineMatch.enabled || !onlineMatch.roomId || !onlineDb) {
+    initGame(false);
+    return;
+  }
+
+  const roomId = onlineMatch.roomId;
+  const role = onlineMatch.role;
+  const side = playerSide;
+  const lastVersion = onlineMatch.lastVersion;
+  const hasOpponent = onlineMatch.hasOpponent;
+  prepareOnlineGame(side, roomId, role, 'playing');
+  onlineMatch.lastVersion = lastVersion;
+  onlineMatch.hasOpponent = hasOpponent;
+  startOnlinePolling();
+  pushOnlineState({ type: 'replay', player: playerSide }, null);
+  if (side === BLACK) {
+    setOnlineStatusHint(hasOpponent ? '好友已在房间，轮到你先手' : '好友不在房间，等待好友回来');
+  } else {
+    setOnlineStatusHint(hasOpponent ? '好友已在房间，等待黑方先手' : '好友不在房间，等待好友回来');
+  }
+}
+
 // 获取技能颜色
 function getSkillColor(skillId) {
   const colors = {
@@ -2433,6 +3767,19 @@ function getSkillColor(skillId) {
     5: COLORS.skill5
   };
   return colors[skillId] || COLORS.gold;
+}
+
+function getAiMoveDelay(min = 2000, max = 3000) {
+  const low = Math.max(0, min);
+  const high = Math.max(low, max);
+  return low + Math.floor(Math.random() * (high - low + 1));
+}
+
+function scheduleAiMove(min = 2000, max = 3000) {
+  if (onlineMatch.enabled) return;
+  setTimeout(() => {
+    aiMove();
+  }, getAiMoveDelay(min, max));
 }
 
 // 检测点击的技能按钮
@@ -2480,6 +3827,11 @@ function handleBoardClick(x, y) {
     return;
   }
 
+  if (isOnlineWaitingForFriend()) {
+    setOnlineStatusHint('等待好友加入后开局');
+    return;
+  }
+
   // 如果有激活的技能
   if (gameState.currentSkill) {
     useSkill(row, col);
@@ -2501,6 +3853,21 @@ function handleBoardClick(x, y) {
   drawGame();
   showTauntTip(playerSide);
 
+  if (onlineMatch.enabled) {
+    pushOnlineState({ type: 'move', row, col, player: playerSide }, result);
+    if (result.gameOver) {
+      onlineMatch.settlementHandled = true;
+      endGame(result.winner, result.forbidden === true, result.winLine || null);
+      return;
+    }
+    if (result.extraTurn) {
+      setOnlineStatusHint('触发额外回合，继续落子');
+      return;
+    }
+    setOnlineTurnStatusHint('已落子');
+    return;
+  }
+
   // 检查游戏结束
   if (result.gameOver) {
     endGame(result.winner, result.forbidden === true, result.winLine || null);
@@ -2517,9 +3884,7 @@ function handleBoardClick(x, y) {
 
   // 正常切换到AI回合
   console.log('[DEBUG] 切换到AI回合');
-  setTimeout(() => {
-    aiMove();
-  }, 800);
+  scheduleAiMove();
 }
 
 // 处理技能点击
@@ -2535,6 +3900,11 @@ function handleSkillClick(skillId) {
 
   if (gameState.turn !== playerSide || gameState.gameOver) {
     console.log('[DEBUG] handleSkillClick 被阻止: turn=', gameState.turn, 'gameOver=', gameState.gameOver);
+    return;
+  }
+
+  if (isOnlineWaitingForFriend()) {
+    setOnlineStatusHint('等待好友加入后开局');
     return;
   }
 
@@ -2570,6 +3940,7 @@ function handleSkillClick(skillId) {
     } else {
       // 技能4和技能5直接生效
       currentMatchStats.playerSkills += 1;
+      recordSkillUse(playerSide, skillId, result.effect || null);
       if (result.effect) {
         startSkillAnimation(result.effect);
       }
@@ -2586,11 +3957,15 @@ function handleSkillClick(skillId) {
       drawGame();
       console.log('[DEBUG] 技能直接生效,skillId:', skillId);
 
+      if (onlineMatch.enabled) {
+        pushOnlineState({ type: 'skill', skillId, player: playerSide, effect: result.effect || null }, result);
+        setOnlineTurnStatusHint('技能已生效');
+        return;
+      }
+
       // 技能1会切换到AI回合，这里补一次AI触发，避免回合卡住
       if (!gameState.gameOver && gameState.turn === aiSide) {
-        setTimeout(() => {
-          aiMove();
-        }, 800);
+        scheduleAiMove();
       }
     }
   }
@@ -2639,6 +4014,7 @@ function aiMove() {
   if (result.success) {
     if (result.effect) {
       currentMatchStats.aiSkills += 1;
+      recordSkillUse(aiSide, result.effect.skillId, result.effect);
       startSkillAnimation(result.effect);
     } else {
       currentMatchStats.aiMoves += 1;
@@ -2653,9 +4029,7 @@ function aiMove() {
 
     // 若AI技能后仍是白方回合（例如技能1不消耗回合），继续执行AI动作，避免回合卡住
     if (!result.gameOver && game.turn === aiSide) {
-      setTimeout(() => {
-        aiMove();
-      }, 520);
+      scheduleAiMove();
       return;
     }
 
@@ -2696,6 +4070,7 @@ function useSkill(row, col) {
   }
 
   currentMatchStats.playerSkills += 1;
+  recordSkillUse(playerSide, result.effect ? result.effect.skillId : gameState.currentSkill, result.effect || null);
   if (result.effect) {
     startSkillAnimation(result.effect);
   }
@@ -2724,12 +4099,26 @@ function useSkill(row, col) {
 
   drawGame();
 
+  if (onlineMatch.enabled) {
+    pushOnlineState({
+      type: 'skill',
+      skillId: result.effect ? result.effect.skillId : gameState.currentSkill,
+      player: playerSide,
+      effect: result.effect || null
+    }, result);
+    if (result.gameOver) {
+      onlineMatch.settlementHandled = true;
+      endGame(result.winner, result.forbidden === true, result.winLine || null);
+      return;
+    }
+    setOnlineTurnStatusHint('技能已同步');
+    return;
+  }
+
   // 仅在当前为AI回合时触发AI行动（例如某些技能会保持当前回合不变）
   if (!gameState.gameOver && gameState.turn === aiSide) {
     console.log('[DEBUG] 技能使用后由AI行动');
-    setTimeout(() => {
-      aiMove();
-    }, 800);
+    scheduleAiMove();
   }
 }
 
@@ -2788,7 +4177,8 @@ function endGame(winner, isForbidden = false, winLine = null) {
   }
 
   setTimeout(() => {
-    gameState.settlementData = buildSettlementData(winner, isForbidden);
+    gameState.settlementData = buildSettlementData(winner, isForbidden, winLine);
+    gameState.settlementReviewScroll = 0;
     gameState.showSettlement = true;
     gameState.showMessage = false;
     drawGame();
@@ -2805,6 +4195,8 @@ wx.onTouchStart(e => {
     // 记录触摸开始位置（用于说明书滚动）
     touchStartY = y;
     touchStartGuideScroll = gameState.guideScroll;
+    touchStartSettlementScroll = gameState.settlementReviewScroll || 0;
+    settlementReviewTouching = gameState.showSettlement && isPointInRect(x, y, settlementReviewBox);
 
     // 如果显示说明书，处理说明书的点击事件
     if (gameState.showGuide) {
@@ -2822,13 +4214,18 @@ wx.onTouchStart(e => {
       return;
     }
 
+    const topBtns = getInGameTopButtonsLayout();
     if (gameState.showSidePicker) {
       handleSidePickerClick(x, y);
       return;
     }
 
+    if (hitMatchExitButton(x, y)) {
+      confirmExitCurrentMatch();
+      return;
+    }
+
     // 检查左上角按钮（声音 + 说明）
-    const topBtns = getInGameTopButtonsLayout();
     if (hitTopToolButton(x, y, topBtns.music)) {
       toggleMusic();
       drawGame();
@@ -2848,6 +4245,18 @@ wx.onTouchStart(e => {
 
 // 监听触摸移动 - 用于说明书滚动
 wx.onTouchMove(e => {
+  if (e.touches.length === 1 && gameState.showSettlement && settlementReviewTouching && settlementReviewBox) {
+    const touch = e.touches[0];
+    const y = touch.clientY;
+    const deltaY = touchStartY - y;
+    gameState.settlementReviewScroll = Math.max(
+      0,
+      Math.min(settlementReviewBox.maxScroll || 0, touchStartSettlementScroll + deltaY)
+    );
+    drawGame();
+    return;
+  }
+
   if (e.touches.length === 1 && gameState.showGuide) {
     const touch = e.touches[0];
     const y = touch.clientY;
@@ -2930,10 +4339,37 @@ function splitGuideText(text, maxChars) {
   return lines.length > 0 ? lines : [''];
 }
 
+function isPointInRect(x, y, rect) {
+  return !!rect && x >= rect.x && x <= rect.x + rect.w &&
+    y >= rect.y && y <= rect.y + rect.h;
+}
+
+function handleNicknameDialogClick(x, y) {
+  if (isPointInRect(x, y, nicknameDialog.inputBox)) {
+    audioManager.playSound('click');
+    showNicknameKeyboard();
+    return;
+  }
+  if (isPointInRect(x, y, nicknameDialog.cancelBtn)) {
+    audioManager.playSound('click');
+    closeNicknameDialog();
+    return;
+  }
+  if (isPointInRect(x, y, nicknameDialog.confirmBtn)) {
+    audioManager.playSound('click');
+    confirmNicknameDialog();
+  }
+}
+
 function handleWelcomeClick(x, y) {
   const layout = getWelcomeLayout();
-  const { startBtnX, btnY, btnW, btnH } = layout;
+  const { startBtnX, btnY, btnW, btnH, modeAiX, modeFriendX, modeBtnY, modeBtnW, modeBtnH } = layout;
   const topBtns = getInGameTopButtonsLayout();
+
+  if (nicknameDialog.visible) {
+    handleNicknameDialogClick(x, y);
+    return;
+  }
 
   // 欢迎页左上角按钮（与对局内一致）
   if (hitTopToolButton(x, y, topBtns.music)) {
@@ -2949,27 +4385,39 @@ function handleWelcomeClick(x, y) {
     return;
   }
 
+  if (x >= modeAiX && x <= modeAiX + modeBtnW &&
+      y >= modeBtnY && y <= modeBtnY + modeBtnH) {
+    welcomeMode = 'ai';
+    audioManager.playSound('click');
+    drawGame();
+    return;
+  }
+  if (x >= modeFriendX && x <= modeFriendX + modeBtnW &&
+      y >= modeBtnY && y <= modeBtnY + modeBtnH) {
+    welcomeMode = 'friend';
+    audioManager.playSound('click');
+    drawGame();
+    return;
+  }
+
   // 选择对手
-  const opponentButtons = getWelcomeOpponentButtons(layout);
-  for (let i = 0; i < opponentButtons.length; i++) {
-    const btn = opponentButtons[i];
-    if (x >= btn.x && x <= btn.x + btn.w &&
-        y >= btn.y && y <= btn.y + btn.h) {
-      currentOpponentId = btn.id;
-      audioManager.playSound('click');
-      drawGame();
-      return;
+  if (welcomeMode === 'ai') {
+    const opponentButtons = getWelcomeOpponentButtons(layout);
+    for (let i = 0; i < opponentButtons.length; i++) {
+      const btn = opponentButtons[i];
+      if (x >= btn.x && x <= btn.x + btn.w &&
+          y >= btn.y && y <= btn.y + btn.h) {
+        currentOpponentId = btn.id;
+        audioManager.playSound('click');
+        drawGame();
+        return;
+      }
     }
   }
 
   if (x >= startBtnX && x <= startBtnX + btnW &&
       y >= btnY && y <= btnY + btnH) {
-    gameState.showWelcome = false;
-    gameState.showGuide = false;
-    gameState.showSidePicker = true;
-    initAudioForGame();
-    clearSystemMessage();
-    drawGame();
+    requestLocalNicknameThen(proceedWelcomeStart);
     return;
   }
 }
@@ -2992,9 +4440,7 @@ function handleSidePickerClick(x, y) {
   showSystemMessage('江湖路远 请赐教', '#d4a574', 1300);
 
   if (aiSide === BLACK) {
-    setTimeout(() => {
-      aiMove();
-    }, 520);
+    scheduleAiMove();
   }
 }
 
@@ -3011,6 +4457,10 @@ function handleSettlementClick(x, y) {
   if (x >= replayBtnX && x <= replayBtnX + btnW &&
       y >= btnY && y <= btnY + btnH) {
     audioManager.playSound('click');
+    if (gameState.settlementData && gameState.settlementData.isOnline) {
+      restartOnlineRoom();
+      return;
+    }
     initGame(false);
     return;
   }
@@ -3137,6 +4587,39 @@ function drawGuide() {
 
 // 初始化游戏
 initGame();
+
+if (wx.showShareMenu) {
+  try {
+    wx.showShareMenu({ withShareTicket: true });
+  } catch (e) {
+    console.log('[WARN] 开启分享菜单失败:', e);
+  }
+}
+
+function handleOnlineLaunchOptions(options) {
+  const query = options && options.query ? options.query : {};
+  const roomId = query.onlineRoom ? decodeURIComponent(query.onlineRoom) : '';
+  if (roomId && onlineMatch.enabled && onlineMatch.roomId === roomId) return;
+  if (roomId) {
+    setTimeout(() => {
+      joinOnlineRoom(roomId);
+    }, 300);
+  }
+}
+
+if (wx.getLaunchOptionsSync) {
+  try {
+    handleOnlineLaunchOptions(wx.getLaunchOptionsSync());
+  } catch (e) {
+    console.log('[WARN] 读取启动参数失败:', e);
+  }
+}
+
+if (wx.onShow) {
+  wx.onShow(options => {
+    handleOnlineLaunchOptions(options);
+  });
+}
 
 // 首次用户交互时尝试播放音乐 (WeChat小游戏需要用户交互)
 function enableMusicOnFirstInteraction() {

@@ -1783,7 +1783,7 @@ class SkillGomoku {
         i++;
       }
 
-      if (line.length >= 5) {
+      if ((player === BLACK && line.length === 5) || (player === WHITE && line.length >= 5)) {
         return line;
       }
     }
